@@ -6,7 +6,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <qrcode.h>
+#include "qrcode.h"
 #include <ArduinoJson.h>
 
 // ===== CONFIGURATION (Modify these values) =====
