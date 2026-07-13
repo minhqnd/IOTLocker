@@ -1,226 +1,295 @@
+#include <Wire.h>
 #include <Keypad.h>
-#include <LiquidCrystal.h>
+#include <LiquidCrystal_I2C.h>
 #include <SoftwareSerial.h>
 
-// --- Configuration & Pin Definitions ---
+// LCD I2C. If the screen stays blank, try 0x3F instead of 0x27.
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// LCD1602 Pinout (4-bit mode)
-// RS -> D10, Enable -> D11, D4 -> D12, D5 -> D13, D6 -> A0, D7 -> A1
-const int pin_RS = 10;
-const int pin_EN = 11;
-const int pin_D4 = 12;
-const int pin_D5 = 13;
-const int pin_D6 = A0;
-const int pin_D7 = A1;
-LiquidCrystal lcd(pin_RS, pin_EN, pin_D4, pin_D5, pin_D6, pin_D7);
-
-// Keypad 4x4 Pinout
-// Rows: D2, D3, D4, D5
-// Columns: D6, D7, D8, D9
 const byte ROWS = 4;
 const byte COLS = 4;
+
 char keys[ROWS][COLS] = {
-  {'1','2','3','A'},
-  {'4','5','6','B'},
-  {'7','8','9','C'},
-  {'*','0','#','D'}
+  {'1', '2', '3', 'A'},
+  {'4', '5', '6', 'B'},
+  {'7', '8', '9', 'C'},
+  {'*', '0', '#', 'D'}
 };
+
 byte rowPins[ROWS] = {2, 3, 4, 5};
 byte colPins[COLS] = {6, 7, 8, 9};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-// SoftwareSerial for UART communication with ESP32
-// RX pin = A3 (connect to ESP32 TX2 GPIO17)
-// TX pin = A2 (connect to ESP32 RX2 GPIO16 via 1k/2k voltage divider)
-const int pin_RX = A3;
-const int pin_TX = A2;
-SoftwareSerial espSerial(pin_RX, pin_TX); // RX, TX
+// HW-898-A TX -> Uno D10. D11 is an unused SoftwareSerial TX pin.
+SoftwareSerial rfidSerial(10, 11);
 
-// --- State Management ---
-enum SystemState {
-  STATE_IDLE,       // Waiting for PIN, Order (A+code), or Shipper code (9999)
-  STATE_DEPOSIT     // Waiting for shipper to enter order code
-};
+// Uno A2 (TX) -> voltage divider -> ESP32 GPIO16.
+// ESP32 GPIO17 -> Uno A3 (RX).
+SoftwareSerial espSerial(A3, A2);
 
-SystemState currentState = STATE_IDLE;
-String inputBuffer = "";
-const unsigned int MAX_INPUT_LENGTH = 16;
+const byte UID_MIN_LENGTH = 6;
+const byte UID_MAX_LENGTH = 14;
+const unsigned long RFID_FRAME_TIMEOUT = 30;
+const unsigned long DUPLICATE_DELAY = 1500;
+const unsigned long ESP_TIMEOUT = 45000UL;
 
-// --- Function Declarations ---
-void updateLCD(String line1, String line2);
-void displayDefaultScreen();
-void handleKeypress(char key);
-void readSerialFromESP();
+char selectedMode = 0;
+String rfidBuffer = "";
+unsigned long lastRfidByteAt = 0;
+String lastUid = "";
+unsigned long lastUidAt = 0;
 
-// --- Setup & Loop ---
+void showMainMenu();
+void showScanPrompt(char mode);
+void showProcessing();
+void showDone();
+void showError(const String &message);
+void readKeypad();
+bool readRfid(String &uid);
+bool finishRfidFrame(String &uid);
+void handleUid(const String &uid);
+String sendRequestToEsp32(char mode, const String &uid);
+void showEspResponse(const String &response);
+String messageForEspCode(const String &code, const String &locker);
 
 void setup() {
-  // Initialize standard Serial for debugging/monitoring
   Serial.begin(9600);
-  Serial.println("Uno Terminal Initialized");
-
-  // Initialize SoftwareSerial for communication with ESP32
+  rfidSerial.begin(9600);
   espSerial.begin(9600);
 
-  // Initialize LCD
-  lcd.begin(16, 2);
-  displayDefaultScreen();
+  lcd.init();
+  lcd.backlight();
+  showMainMenu();
+
+  rfidSerial.listen();
+  Serial.println(F("UNO V2 READY"));
 }
 
 void loop() {
-  // 1. Read keypad input
+  readKeypad();
+
+  if (selectedMode != 0) {
+    String uid;
+    if (readRfid(uid)) {
+      handleUid(uid);
+    }
+  }
+}
+
+void readKeypad() {
   char key = keypad.getKey();
-  if (key != NO_KEY) {
-    handleKeypress(key);
-  }
+  if (!key) return;
 
-  // 2. Read messages from ESP32 via UART
-  readSerialFromESP();
-}
-
-// --- Logic Implementations ---
-
-/**
- * Updates the LCD 1602 screen with two lines of text.
- * Truncates lines to 16 characters if necessary.
- */
-void updateLCD(String line1, String line2) {
-  lcd.clear();
-  
-  lcd.setCursor(0, 0);
-  if (line1.length() > 16) {
-    lcd.print(line1.substring(0, 16));
-  } else {
-    lcd.print(line1);
-  }
-  
-  lcd.setCursor(0, 1);
-  if (line2.length() > 16) {
-    lcd.print(line2.substring(0, 16));
-  } else {
-    lcd.print(line2);
-  }
-}
-
-/**
- * Shows the default waiting screen on the LCD.
- */
-void displayDefaultScreen() {
-  updateLCD("Smart Locker L01", "Nhap PIN / Phim A");
-}
-
-/**
- * Handles keypad character inputs, building the buffers,
- * transitioning states, and sending UART payloads.
- */
-void handleKeypress(char key) {
-  Serial.print("Key pressed: ");
+  Serial.print(F("Key: "));
   Serial.println(key);
 
-  // '*' acts as Clear or Cancel
+  if (key == 'A' || key == 'B' || key == 'C' || key == 'D') {
+    selectedMode = key;
+    rfidBuffer = "";
+    rfidSerial.listen();
+    showScanPrompt(key);
+    return;
+  }
+
   if (key == '*') {
-    inputBuffer = "";
-    if (currentState == STATE_DEPOSIT) {
-      currentState = STATE_IDLE;
-      Serial.println("Cancelled deposit mode");
-    }
-    // Inform ESP32 that the current operation is cancelled
-    espSerial.println("CANCEL");
-    displayDefaultScreen();
-    return;
-  }
-
-  // '#' acts as Enter/Confirm
-  if (key == '#') {
-    if (inputBuffer.length() == 0) {
-      return; // Nothing to submit
-    }
-
-    if (currentState == STATE_IDLE) {
-      // Check for shipper entry code
-      if (inputBuffer == "9999") {
-        currentState = STATE_DEPOSIT;
-        inputBuffer = "";
-        updateLCD("NHAP MA DON:", "(Shipper)");
-        Serial.println("Switched to DEPOSIT state");
-      }
-      // Check for COD order entry (starts with A)
-      else if (inputBuffer.startsWith("A")) {
-        String orderCode = inputBuffer.substring(1); // Strip the 'A'
-        espSerial.println("ORDER:" + orderCode);
-        Serial.println("Sent ORDER:" + orderCode);
-        inputBuffer = "";
-        updateLCD("Gui ma don...", "Vui long cho...");
-      }
-      // Otherwise, treat as regular prepaid PIN or COD-offline PIN entry
-      else {
-        espSerial.println("PIN:" + inputBuffer);
-        Serial.println("Sent PIN:" + inputBuffer);
-        inputBuffer = "";
-        updateLCD("Gui ma PIN...", "Vui long cho...");
-      }
-    } 
-    else if (currentState == STATE_DEPOSIT) {
-      // Shipper enters the order code to deposit the package
-      espSerial.println("DEPOSIT:" + inputBuffer);
-      Serial.println("Sent DEPOSIT:" + inputBuffer);
-      inputBuffer = "";
-      currentState = STATE_IDLE;
-      updateLCD("Gui deposit...", "Vui long cho...");
-    }
-    return;
-  }
-
-  // Handle character accumulation (0-9, A, B, C, D)
-  if (inputBuffer.length() < MAX_INPUT_LENGTH) {
-    inputBuffer += key;
-    
-    // Refresh LCD display with masked/unmasked buffer
-    if (currentState == STATE_DEPOSIT) {
-      updateLCD("NHAP MA DON:", inputBuffer);
-    } 
-    else { // STATE_IDLE
-      if (inputBuffer.startsWith("A")) {
-        // Display COD code entry clearly
-        updateLCD("MA DON COD:", inputBuffer);
-      } else {
-        // Mask PIN entries with '*' for security
-        String masked = "";
-        for (unsigned int i = 0; i < inputBuffer.length(); i++) {
-          masked += "*";
-        }
-        updateLCD("NHAP MA PIN:", masked);
-      }
-    }
+    selectedMode = 0;
+    rfidBuffer = "";
+    showMainMenu();
+    rfidSerial.listen();
   }
 }
 
-/**
- * Reads messages from the ESP32 via SoftwareSerial.
- * Protocol: expects "MSG:<text>" where <text> is printed on LCD.
- * Supporting line breaks using '|' separator. Example: "MSG:Line 1|Line 2"
- */
-void readSerialFromESP() {
-  if (espSerial.available() > 0) {
-    String line = espSerial.readStringUntil('\n');
-    line.trim();
+void showMainMenu() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("A:Gui B:Them"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("C:Lay  *:Huy"));
+}
 
-    if (line.length() == 0) return;
+void showScanPrompt(char mode) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
 
-    Serial.print("UART received: ");
-    Serial.println(line);
+  if (mode == 'A') lcd.print(F("Che do A: Gui"));
+  else if (mode == 'B') lcd.print(F("Che do B: Them"));
+  else if (mode == 'C') lcd.print(F("Che do C: Lay"));
+  else lcd.print(F("MASTER: Reset"));
 
-    if (line.startsWith("MSG:")) {
-      String msg = line.substring(4);
-      int pipeIdx = msg.indexOf('|');
-      
-      if (pipeIdx != -1) {
-        String line1 = msg.substring(0, pipeIdx);
-        String line2 = msg.substring(pipeIdx + 1);
-        updateLCD(line1, line2);
-      } else {
-        updateLCD(msg, "");
+  lcd.setCursor(0, 1);
+  lcd.print(F("Hay quet the..."));
+}
+
+void showProcessing() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Dang xu ly..."));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Vui long cho"));
+}
+
+void showDone() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Da xong!"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Xem OLED"));
+}
+
+void showError(const String &message) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Co loi"));
+  lcd.setCursor(0, 1);
+  lcd.print(message.substring(0, 16));
+}
+
+bool readRfid(String &uid) {
+  while (rfidSerial.available()) {
+    byte value = rfidSerial.read();
+    lastRfidByteAt = millis();
+
+    bool isUidChar =
+      (value >= '0' && value <= '9') ||
+      (value >= 'A' && value <= 'F') ||
+      (value >= 'a' && value <= 'f');
+
+    if (isUidChar) {
+      rfidBuffer += (char)value;
+      if (rfidBuffer.length() >= UID_MAX_LENGTH) {
+        return finishRfidFrame(uid);
       }
+      continue;
+    }
+
+    // Space, CR, LF, STX, ETX, or other delimiters end a UID frame.
+    if (rfidBuffer.length() >= UID_MIN_LENGTH) {
+      return finishRfidFrame(uid);
+    }
+
+    rfidBuffer = "";
+  }
+
+  if (rfidBuffer.length() >= UID_MIN_LENGTH && millis() - lastRfidByteAt > RFID_FRAME_TIMEOUT) {
+    return finishRfidFrame(uid);
+  }
+
+  return false;
+}
+
+bool finishRfidFrame(String &uid) {
+  rfidBuffer.trim();
+
+  if (rfidBuffer.length() < UID_MIN_LENGTH) {
+    rfidBuffer = "";
+    return false;
+  }
+
+  uid = rfidBuffer;
+  uid.toUpperCase();
+  rfidBuffer = "";
+
+  if (uid == lastUid && millis() - lastUidAt < DUPLICATE_DELAY) {
+    return false;
+  }
+
+  lastUid = uid;
+  lastUidAt = millis();
+
+  while (rfidSerial.available()) {
+    rfidSerial.read();
+  }
+
+  return true;
+}
+
+void handleUid(const String &uid) {
+  Serial.print(F("UID=["));
+  Serial.print(uid);
+  Serial.print(F("] len="));
+  Serial.println(uid.length());
+
+  showProcessing();
+  String response = sendRequestToEsp32(selectedMode, uid);
+
+  selectedMode = 0;
+  showEspResponse(response);
+  delay(2500);
+  showMainMenu();
+  rfidSerial.listen();
+}
+
+String sendRequestToEsp32(char mode, const String &uid) {
+  espSerial.listen();
+  delay(30);
+
+  espSerial.print(F("REQ|"));
+  espSerial.print(mode);
+  espSerial.print('|');
+  espSerial.println(uid);
+
+  Serial.print(F("Gui ESP32: REQ|"));
+  Serial.print(mode);
+  Serial.print('|');
+  Serial.println(uid);
+
+  String response = "";
+  unsigned long startedAt = millis();
+
+  while (millis() - startedAt < ESP_TIMEOUT) {
+    while (espSerial.available()) {
+      char c = espSerial.read();
+
+      if (c == '\n') {
+        response.trim();
+        Serial.print(F("ESP32 tra ve: "));
+        Serial.println(response);
+        rfidSerial.listen();
+        return response;
+      }
+
+      if (c != '\r') response += c;
     }
   }
+
+  rfidSerial.listen();
+  return "ERR|0|ESP_TIMEOUT";
+}
+
+void showEspResponse(const String &response) {
+  int p1 = response.indexOf('|');
+  int p2 = response.indexOf('|', p1 + 1);
+
+  if (p1 < 0 || p2 < 0) {
+    showError(response);
+    return;
+  }
+
+  String status = response.substring(0, p1);
+  String locker = response.substring(p1 + 1, p2);
+  String code = response.substring(p2 + 1);
+  String message = messageForEspCode(code, locker);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(status == "OK" ? F("Thanh cong") : F("Khong thanh cong"));
+  lcd.setCursor(0, 1);
+  lcd.print(message.substring(0, 16));
+}
+
+String messageForEspCode(const String &code, const String &locker) {
+  if (code == "DEPOSIT_OK") return "Da gui hoc " + locker;
+  if (code == "REOPEN_OK") return "Mo lai hoc " + locker;
+  if (code == "PICKUP_OK") return "Da lay hoc " + locker;
+  if (code == "RESET_OK") return "Da reset";
+  if (code == "ALREADY_HAS") return "The da co hoc";
+  if (code == "FULL") return "Tu da day";
+  if (code == "NOT_FOUND") return "Chua gui do";
+  if (code == "NOT_OPENED") return "Chua mo cua";
+  if (code == "DOOR_OPEN") return "Cua chua dong";
+  if (code == "BAD_UID") return "The loi";
+  if (code == "BAD_MODE") return "Sai che do";
+  if (code == "BAD_REQUEST") return "Loi yeu cau";
+  if (code == "ESP_TIMEOUT") return "ESP timeout";
+  return code;
 }
