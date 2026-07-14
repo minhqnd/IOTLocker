@@ -151,7 +151,7 @@ void showScanPrompt(char selectedMode) {
   else lcd.print(F("RESET TU"));
 
   lcd.setCursor(0, 1);
-  if (selectedMode == 'B') lcd.print(F("Quet the dang gui"));
+  if (selectedMode == 'B') lcd.print(F("Quet the"));
   else if (selectedMode == 'D') lcd.print(F("Quet the bat ky"));
   else lcd.print(F("Quet the cua ban"));
 }

@@ -111,6 +111,8 @@ void processRequest(const String &request) {
 
   int separator1 = request.indexOf('|');
   int separator2 = request.indexOf('|', separator1 + 1);
+
+  // chi nhan dung format tu Uno: REQ|MODE|UID, sai thi bo luon cho de debug
   if (separator1 < 0 || separator2 < 0 || !request.startsWith("REQ|")) {
     report(false, 0, "BAD_REQUEST", "LOI YEU CAU");
     returnToIdle();
@@ -135,6 +137,7 @@ void processRequest(const String &request) {
   Serial.print(F(" mode="));
   Serial.println(mode);
 
+  // hard reset - dang demo - cai nay dung se dung master key, hoac dung passcode tu server
   if (mode == 'D') {
     beepScanOk();
     handleReset();
@@ -166,6 +169,7 @@ void handleDeposit(const String &uid) {
     return;
   }
 
+  // A = gui lan dau, the nao da co hoc roi thi khong cho tao hoc moi nua
   int locker = findEmptyLocker();
   if (locker < 0) {
     report(false, 0, "FULL", "TU DA DAY");
@@ -177,6 +181,7 @@ void handleDeposit(const String &uid) {
 
   DoorResult result = openLocker(locker, "CHE DO A: GUI", "Cho do vao");
   if (result != DOOR_OK) {
+    // cua chua tung mo thi coi nhu gui that bai, xoa UID vua luu de hoc van trong
     if (result == DOOR_NOT_OPENED) {
       lockerUid[locker] = "";
       saveLocker(locker);
@@ -198,6 +203,7 @@ void handleReopen(const String &uid) {
     return;
   }
 
+  // B chi mo lai hoc dang co do, khong doi UID va cung khong xoa trang thai
   DoorResult result = openLocker(locker, "CHE DO B: THEM", "Them do vao");
   if (result == DOOR_OK) {
     report(true, locker + 1, "REOPEN_OK", "THEM THANH CONG");
@@ -214,6 +220,7 @@ void handlePickup(const String &uid) {
     return;
   }
 
+  // C la lay do: mo dung hoc, dong cua xong moi xoa UID de hoc trong lai
   DoorResult result = openLocker(locker, "CHE DO C: LAY", "Lay do ra");
   if (result != DOOR_OK) {
     reportDoorError(result, locker);
@@ -242,6 +249,7 @@ DoorResult openLocker(int locker, const char *title, const char *actionText) {
   showText(title, lockerLabel(locker));
   unlockDoor(locker);
 
+  // servo da nha khoa roi, nen OLED chi noi user can lam gi tiep theo
   showLockerGuide(locker, actionText, "Dong cua lai");
   if (!waitForDoorState(locker, DOOR_OPEN_STATE, WAIT_OPEN_TIMEOUT)) {
     lockDoor(locker);
@@ -249,6 +257,7 @@ DoorResult openLocker(int locker, const char *title, const char *actionText) {
     return DOOR_NOT_OPENED;
   }
 
+  // den day la cua da tung mo, gio chi cho user dong cua lai de ket thuc luong
   showLockerGuide(locker, actionText, "Dong cua lai");
   if (!waitForDoorClose(locker)) {
     showLockerGuide(locker, "Cua chua dong", "Dong cua lai");
