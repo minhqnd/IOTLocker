@@ -1,87 +1,68 @@
-import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
 import { extractOrderCode } from '@/lib/sepay';
+import { supabase } from '@/lib/supabase';
+
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: Request) {
   try {
     const payload = await request.json();
-    const { id, transferAmount, content } = payload;
+    const content = String(payload.content || payload.description || '');
+    const transferAmount = Number(payload.transferAmount || payload.amount || 0);
+    const sepayId = String(payload.id || payload.transactionId || '');
+    const paymentId = extractOrderCode(content);
 
-    if (!id || typeof transferAmount !== 'number' || !content) {
-      return NextResponse.json({ success: false, error: 'Invalid webhook payload parameters' }, { status: 400 });
+    if (!paymentId) {
+      return Response.json({ success: true, message: 'Ignored: no payment id in content' });
     }
 
-    // 1. Extract the 6-digit order code from bank transfer memo
-    const orderCode = extractOrderCode(content);
-    if (!orderCode) {
-      console.log(`[SePay Webhook] Transaction ID: ${id} ignored. Reason: No 6-digit order code found in: "${content}"`);
-      return NextResponse.json({ success: true, message: 'Ignored: No 6-digit order code in content description' });
-    }
-
-    // 2. Fetch the corresponding order
-    const { data: order, error: fetchError } = await supabase
-      .from('orders')
+    const { data: session, error } = await supabase
+      .from('locker_sessions')
       .select('*')
-      .eq('order_code', orderCode)
+      .eq('payment_id', paymentId)
+      .eq('is_active', true)
       .maybeSingle();
 
-    if (fetchError) {
-      return NextResponse.json({ success: false, error: fetchError.message }, { status: 500 });
+    if (error) {
+      return Response.json({ success: false, error: error.message }, { status: 500 });
     }
 
-    if (!order) {
-      console.log(`[SePay Webhook] Transaction ID: ${id} ignored. Reason: Extracted order code "${orderCode}" does not exist in DB.`);
-      return NextResponse.json({ success: true, message: 'Ignored: Extracted order code not found in database' });
+    if (!session) {
+      return Response.json({ success: true, message: 'Ignored: payment session not found' });
     }
 
-    // 3. Idempotency: check if order is already marked as paid
-    if (order.paid || order.status === 'paid' || order.status === 'picked') {
-      return NextResponse.json({ success: true, message: 'Success: Order is already marked as paid' });
+    if (session.payment_status === 'paid') {
+      return Response.json({ success: true, message: 'Already paid' });
     }
 
-    // Ensure we do not process the same transaction ID twice
-    if (order.sepay_ref === String(id)) {
-      return NextResponse.json({ success: true, message: 'Success: Webhook transaction already processed' });
+    if (transferAmount < Number(session.fee_amount || 0)) {
+      return Response.json({ success: true, message: 'Ignored: amount too small' });
     }
 
-    // 4. Verification: check that the transfer amount matches the order amount
-    if (transferAmount !== order.amount) {
-      console.warn(`[SePay Webhook] Transaction ID: ${id} payment failed. Amount mismatch: transferAmount=${transferAmount}, expected=${order.amount}`);
-      return NextResponse.json({ success: true, message: `Ignored: Amount mismatch. Received ${transferAmount}, expected ${order.amount}` });
-    }
-
-    // 5. Update the order status to paid
+    const now = new Date().toISOString();
     const { error: updateError } = await supabase
-      .from('orders')
+      .from('locker_sessions')
       .update({
-        paid: true,
-        status: 'paid',
-        sepay_ref: String(id),
-        updated_at: new Date().toISOString(),
+        payment_status: 'paid',
+        paid_at: now,
+        updated_at: now,
       })
-      .eq('id', order.id);
+      .eq('id', session.id);
 
     if (updateError) {
-      return NextResponse.json({ success: false, error: updateError.message }, { status: 500 });
+      return Response.json({ success: false, error: updateError.message }, { status: 500 });
     }
 
-    // 6. Log the payment event
     await supabase.from('events').insert({
       type: 'payment',
-      locker_id: order.locker_id,
-      compartment: order.compartment,
-      order_code: orderCode,
-      payload: {
-        sepay_transaction_id: id,
-        transfer_amount: transferAmount,
-        content: content,
-        previous_status: order.status,
-        new_status: 'paid',
-      },
+      device_id: session.device_id,
+      uid: session.uid,
+      locker_number: session.locker_number,
+      session_id: session.id,
+      payload: { sepayId, transferAmount, content, paymentId },
     });
 
-    return NextResponse.json({ success: true });
-  } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message || 'Internal Server Error' }, { status: 500 });
+    return Response.json({ success: true });
+  } catch (error: unknown) {
+    return Response.json({ success: false, error: error instanceof Error ? error.message : 'Internal Server Error' }, { status: 500 });
   }
 }

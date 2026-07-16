@@ -1,4 +1,6 @@
 #include <Preferences.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
 #include <ESP32Servo.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -10,19 +12,36 @@ enum DoorResult {
   DOOR_LEFT_OPEN
 };
 
+enum AccessDecision {
+  ACCESS_ALLOW,
+  ACCESS_NEED_PAYMENT,
+  ACCESS_DENY,
+  ACCESS_BYPASS
+};
+
+struct AccessCheck {
+  AccessDecision decision;
+  String paymentId;
+  int fee;
+};
+
 const int LOCKER_COUNT = 2;
+// 18 hoc 1, 23 hoc 2
 const int SERVO_PINS[LOCKER_COUNT] = {18, 23};
+// 19 hoc 1, 27 hoc 2
 const int DOOR_PINS[LOCKER_COUNT] = {19, 27};
 
 const int SERVO_LOCK_ANGLE = 90;
 const int SERVO_UNLOCK_ANGLE = 0;
+
+// nam cham gan cam bien = cua dong = LOW
 const int DOOR_CLOSED_STATE = LOW;
 const int DOOR_OPEN_STATE = HIGH;
 
-const unsigned long WAIT_OPEN_TIMEOUT = 10000UL;
-const unsigned long WAIT_CLOSE_TIMEOUT = 30000UL;
-const unsigned long DOOR_ALARM_AFTER = 15000UL;
-const unsigned long RESULT_HOLD = 3000UL;
+const unsigned long WAIT_OPEN_TIMEOUT = 10000;
+const unsigned long WAIT_CLOSE_TIMEOUT = 30000;
+const unsigned long DOOR_ALARM_AFTER = 15000;
+const unsigned long RESULT_HOLD = 3000;
 
 const byte UID_MIN_LENGTH = 6;
 const byte UID_MAX_LENGTH = 14;
@@ -35,6 +54,18 @@ const int UNO_RX_PIN = 16;
 const int UNO_TX_PIN = 17;
 HardwareSerial UnoSerial(2);
 
+// Sua 3 dong nay truoc khi nap len ESP32.
+const char WIFI_SSID[] = "YOUR_WIFI";
+const char WIFI_PASSWORD[] = "YOUR_PASSWORD";
+const char API_BASE_URL[] = "https://your-vercel-app.vercel.app";
+const char DEVICE_ID[] = "locker-01";
+
+const unsigned long WIFI_TIMEOUT = 7000;
+const unsigned long HTTP_TIMEOUT = 5000;
+const unsigned long HEARTBEAT_EVERY = 60000;
+const unsigned long PAYMENT_POLL_EVERY = 2000;
+const unsigned long PAYMENT_POLL_TIMEOUT = 40000;
+
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
@@ -46,6 +77,7 @@ bool oledReady = false;
 Servo lockerServo[LOCKER_COUNT];
 String lockerUid[LOCKER_COUNT];
 Preferences preferences;
+unsigned long lastHeartbeatAt = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -73,11 +105,16 @@ void setup() {
 
   printLockerState();
   showIdle();
+  ensureWifi();
+  sendHeartbeat();
   Serial.println(F("ESP32 V2 READY"));
 }
 
 void loop() {
   readUnoRequest();
+  if (millis() - lastHeartbeatAt > HEARTBEAT_EVERY) {
+    sendHeartbeat();
+  }
 }
 
 void readUnoRequest() {
@@ -192,7 +229,7 @@ void handleDeposit(const String &uid) {
   }
 
   report(true, locker + 1, "DEPOSIT_OK", "GUI THANH CONG");
-  logEvent("deposit", uid, locker);
+  postDeposit(uid, locker);
   printLockerState();
 }
 
@@ -202,6 +239,9 @@ void handleReopen(const String &uid) {
     report(false, 0, "NOT_FOUND", "THE CHUA GUI DO");
     return;
   }
+
+  AccessCheck access = checkServerAccess(uid, 'B');
+  if (!canContinueAfterAccess(access, locker, uid)) return;
 
   // B chi mo lai hoc dang co do, khong doi UID va cung khong xoa trang thai
   DoorResult result = openLocker(locker, "CHE DO B: THEM", "Them do vao");
@@ -220,6 +260,9 @@ void handlePickup(const String &uid) {
     return;
   }
 
+  AccessCheck access = checkServerAccess(uid, 'C');
+  if (!canContinueAfterAccess(access, locker, uid)) return;
+
   // C la lay do: mo dung hoc, dong cua xong moi xoa UID de hoc trong lai
   DoorResult result = openLocker(locker, "CHE DO C: LAY", "Lay do ra");
   if (result != DOOR_OK) {
@@ -230,7 +273,7 @@ void handlePickup(const String &uid) {
   lockerUid[locker] = "";
   saveLocker(locker);
   report(true, locker + 1, "PICKUP_OK", "LAY THANH CONG");
-  logEvent("pickup", uid, locker);
+  postPickup(uid);
   printLockerState();
 }
 
@@ -249,7 +292,7 @@ DoorResult openLocker(int locker, const char *title, const char *actionText) {
   showText(title, lockerLabel(locker));
   unlockDoor(locker);
 
-  // servo da nha khoa roi, nen OLED chi noi user can lam gi tiep theo
+  // OLED chi noi user can lam gi tiep theo vi cua da mo
   showLockerGuide(locker, actionText, "Dong cua lai");
   if (!waitForDoorState(locker, DOOR_OPEN_STATE, WAIT_OPEN_TIMEOUT)) {
     lockDoor(locker);
@@ -257,7 +300,7 @@ DoorResult openLocker(int locker, const char *title, const char *actionText) {
     return DOOR_NOT_OPENED;
   }
 
-  // den day la cua da tung mo, gio chi cho user dong cua lai de ket thuc luong
+  // cua dang mo, yeu cau user dong cua lai ket thuc luong
   showLockerGuide(locker, actionText, "Dong cua lai");
   if (!waitForDoorClose(locker)) {
     showLockerGuide(locker, "Cua chua dong", "Dong cua lai");
@@ -449,9 +492,278 @@ void showResult(bool ok, const String &title, int lockerNumber) {
   display.display();
 }
 
+void showPayment(const String &paymentId, int fee) {
+  if (!oledReady) return;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("CAN THANH TOAN");
+  display.setCursor(0, 18);
+  display.print("Phi: ");
+  display.print(fee);
+  display.println(" VND");
+  display.setCursor(0, 34);
+  display.print("Ma: ");
+  display.println(paymentId);
+  display.setCursor(0, 50);
+  display.println("Cho xac nhan...");
+  display.display();
+}
+
 void returnToIdle() {
   delay(RESULT_HOLD);
   showIdle();
+}
+
+bool ensureWifi() {
+  if (WiFi.status() == WL_CONNECTED) return true;
+
+  showText("KET NOI MANG", "Dang thu...");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_TIMEOUT) {
+    delay(200);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print(F("[WIFI] "));
+    Serial.println(WiFi.localIP());
+    return true;
+  }
+
+  Serial.println(F("[WIFI] timeout, chay offline"));
+  showText("MAT MANG", "Dung tam");
+  delay(800);
+  return false;
+}
+
+void sendHeartbeat() {
+  lastHeartbeatAt = millis();
+  if (!ensureWifi()) return;
+
+  String body = "{\"deviceId\":\"" + String(DEVICE_ID) + "\"}";
+  String response = httpPost("/api/locker/heartbeat", body);
+  Serial.print(F("[API] heartbeat "));
+  Serial.println(response.length() > 0 ? F("ok") : F("fail"));
+}
+
+void postDeposit(const String &uid, int locker) {
+  if (!ensureWifi()) {
+    logEvent("deposit_offline", uid, locker);
+    return;
+  }
+
+  String body = "{\"deviceId\":\"" + String(DEVICE_ID) +
+                "\",\"uid\":\"" + uid +
+                "\",\"locker\":" + String(locker + 1) + "}";
+  String response = httpPost("/api/locker/deposit", body);
+  if (jsonBool(response, "ok")) logEvent("deposit_api", uid, locker);
+  else logEvent("deposit_api_fail", uid, locker);
+}
+
+void postPickup(const String &uid) {
+  if (!ensureWifi()) {
+    Serial.println(F("[API] pickup offline"));
+    return;
+  }
+
+  String body = "{\"deviceId\":\"" + String(DEVICE_ID) +
+                "\",\"uid\":\"" + uid + "\"}";
+  String response = httpPost("/api/locker/pickup", body);
+  Serial.print(F("[API] pickup "));
+  Serial.println(jsonBool(response, "ok") ? F("ok") : F("fail"));
+}
+
+AccessCheck checkServerAccess(const String &uid, char mode) {
+  AccessCheck result;
+  result.decision = ACCESS_BYPASS;
+  result.paymentId = "";
+  result.fee = 0;
+
+  // Mat mang thi cho mo tam, vi tu van con UID local trong NVS de doi chieu.
+  if (!ensureWifi()) return result;
+
+  showText("KIEM TRA", "May chu...");
+  String path = "/api/locker/access?deviceId=" + urlEncode(DEVICE_ID) +
+                "&uid=" + urlEncode(uid) +
+                "&mode=" + String(mode);
+  String response = httpGet(path);
+
+  if (response.length() == 0) {
+    Serial.println(F("[API] access timeout, bypass"));
+    return result;
+  }
+
+  if (jsonBool(response, "allowOpen")) {
+    result.decision = ACCESS_ALLOW;
+    return result;
+  }
+
+  if (jsonHas(response, "paymentId")) {
+    result.decision = ACCESS_NEED_PAYMENT;
+    result.paymentId = jsonString(response, "paymentId");
+    result.fee = jsonInt(response, "fee");
+
+    String qrPayload = jsonString(response, "qrPayload");
+    if (qrPayload.length() > 0) {
+      Serial.print(F("PAYQR|"));
+      Serial.println(qrPayload);
+    }
+    return result;
+  }
+
+  if (jsonHas(response, "found") && !jsonBool(response, "found")) {
+    result.decision = ACCESS_DENY;
+    return result;
+  }
+
+  return result;
+}
+
+bool canContinueAfterAccess(const AccessCheck &access, int locker, const String &uid) {
+  if (access.decision == ACCESS_ALLOW || access.decision == ACCESS_BYPASS) return true;
+
+  if (access.decision == ACCESS_NEED_PAYMENT) {
+    bool paid = waitForPayment(access.paymentId, access.fee);
+    if (paid) return true;
+
+    report(false, locker + 1, "PAY_TIMEOUT", "CHUA THANH TOAN");
+    return false;
+  }
+
+  report(false, locker + 1, "SERVER_DENY", "KHONG MO DUOC");
+  Serial.print(F("[ACCESS DENY] UID="));
+  Serial.println(uid);
+  return false;
+}
+
+bool waitForPayment(const String &paymentId, int fee) {
+  if (paymentId.length() == 0) return false;
+
+  unsigned long startedAt = millis();
+  while (millis() - startedAt < PAYMENT_POLL_TIMEOUT) {
+    showPayment(paymentId, fee);
+
+    if (!ensureWifi()) {
+      Serial.println(F("[PAY] mat mang luc cho, bypass"));
+      return true;
+    }
+
+    String path = "/api/payment/status?paymentId=" + urlEncode(paymentId);
+    String response = httpGet(path);
+    if (response.length() == 0) {
+      Serial.println(F("[PAY] timeout, bypass"));
+      return true;
+    }
+
+    if (jsonBool(response, "paid") || jsonBool(response, "allowOpen")) {
+      showText("DA THANH TOAN", "Dang mo...");
+      return true;
+    }
+
+    delay(PAYMENT_POLL_EVERY);
+  }
+
+  return false;
+}
+
+String httpGet(const String &path) {
+  HTTPClient http;
+  String url = String(API_BASE_URL) + path;
+  http.begin(url);
+  http.setTimeout(HTTP_TIMEOUT);
+
+  int status = http.GET();
+  String response = "";
+  if (status > 0) response = http.getString();
+  http.end();
+
+  Serial.print(F("[GET] "));
+  Serial.print(path);
+  Serial.print(F(" -> "));
+  Serial.println(status);
+  return response;
+}
+
+String httpPost(const String &path, const String &body) {
+  HTTPClient http;
+  String url = String(API_BASE_URL) + path;
+  http.begin(url);
+  http.setTimeout(HTTP_TIMEOUT);
+  http.addHeader("Content-Type", "application/json");
+
+  int status = http.POST(body);
+  String response = "";
+  if (status > 0) response = http.getString();
+  http.end();
+
+  Serial.print(F("[POST] "));
+  Serial.print(path);
+  Serial.print(F(" -> "));
+  Serial.println(status);
+  return response;
+}
+
+String urlEncode(const String &value) {
+  String encoded = "";
+  const char hex[] = "0123456789ABCDEF";
+
+  for (unsigned int i = 0; i < value.length(); i++) {
+    char c = value.charAt(i);
+    bool safe = (c >= 'A' && c <= 'Z') ||
+                (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') ||
+                c == '-' || c == '_' || c == '.';
+    if (safe) {
+      encoded += c;
+    } else {
+      encoded += '%';
+      encoded += hex[(c >> 4) & 0x0F];
+      encoded += hex[c & 0x0F];
+    }
+  }
+
+  return encoded;
+}
+
+bool jsonHas(const String &json, const char *key) {
+  return json.indexOf("\"" + String(key) + "\"") >= 0;
+}
+
+bool jsonBool(const String &json, const char *key) {
+  String marker = "\"" + String(key) + "\":true";
+  return json.indexOf(marker) >= 0;
+}
+
+int jsonInt(const String &json, const char *key) {
+  String marker = "\"" + String(key) + "\":";
+  int start = json.indexOf(marker);
+  if (start < 0) return 0;
+  start += marker.length();
+
+  String number = "";
+  while (start < (int)json.length()) {
+    char c = json.charAt(start);
+    if (c < '0' || c > '9') break;
+    number += c;
+    start++;
+  }
+
+  return number.toInt();
+}
+
+String jsonString(const String &json, const char *key) {
+  String marker = "\"" + String(key) + "\":\"";
+  int start = json.indexOf(marker);
+  if (start < 0) return "";
+  start += marker.length();
+
+  int end = json.indexOf('"', start);
+  if (end < 0) return "";
+  return json.substring(start, end);
 }
 
 void buzzerOn() {
