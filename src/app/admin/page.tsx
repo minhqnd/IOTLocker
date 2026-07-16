@@ -31,6 +31,7 @@ type EventLog = {
   type: string;
   uid: string | null;
   locker_number: number | null;
+  payload: Record<string, unknown> | null;
   created_at: string;
 };
 
@@ -232,11 +233,12 @@ export default function AdminPage() {
                     <span className="font-mono text-xs font-medium text-zinc-400">#{index + 1}</span>
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium text-zinc-950">{event.type}</span>
+                        <span className="font-medium text-zinc-950">{eventTitle(event)}</span>
                         {/* {index === 0 ? <span className="rounded-md bg-zinc-900 px-2 py-0.5 text-xs font-medium text-white">Mới nhất</span> : null} */}
                       </div>
+                      <p className="mt-1 text-xs text-zinc-500">{eventDescription(event)}</p>
                       <p className="mt-1 font-mono text-xs text-zinc-600">
-                        {event.uid || '-'} {event.locker_number ? `| Hộc ${event.locker_number}` : ''}
+                        {event.uid || '-'} {event.locker_number ? ` | Hộc ${event.locker_number}` : ''}
                       </p>
                     </div>
                     <time className="font-mono text-xs text-zinc-500 sm:text-right">{formatTime(event.created_at)}</time>
@@ -380,6 +382,47 @@ function RealtimeBadge({ status, lastRealtimeAt }: { status: string; lastRealtim
   );
 }
 
+function eventTitle(event: EventLog) {
+  const mode = String(event.payload?.mode || '').toUpperCase();
+  const labels: Record<string, string> = {
+    deposit: 'Gửi đồ',
+    pickup: 'Lấy đồ xong',
+    payment: 'Đã thanh toán',
+    admin_deposit: 'Admin tạo phiên gửi',
+    admin_overdue: 'Admin chuyển quá hạn',
+    admin_paid: 'Admin đánh dấu đã thanh toán',
+    admin_pickup: 'Admin kết thúc phiên',
+    admin_pending: 'Admin tạo yêu cầu thanh toán',
+  };
+
+  if (event.type === 'access_allow') {
+    if (mode === 'A') return 'Mở hộc gửi đồ';
+    if (mode === 'B') return 'Mở hộc gửi thêm';
+    if (mode === 'C') return 'Mở hộc lấy đồ';
+    return 'Cho phép mở hộc';
+  }
+
+  return labels[event.type] || event.type;
+}
+
+function eventDescription(event: EventLog) {
+  const mode = String(event.payload?.mode || '').toUpperCase();
+  const overdue = event.payload?.overdue === true;
+  const paid = event.payload?.paid === true;
+
+  if (event.type === 'access_allow') {
+    const action = mode ? `Phím ${mode}` : 'Quét thẻ';
+    const payment = overdue ? (paid ? 'đã thanh toán phí quá hạn' : 'đang cần thanh toán') : 'trong thời gian miễn phí';
+    return `${action}: server cho phép ESP mở hộc, ${payment}.`;
+  }
+
+  if (event.type === 'deposit') return 'ESP báo đã tạo phiên gửi đồ mới.';
+  if (event.type === 'pickup') return 'ESP báo user đã lấy đồ, server đóng phiên gửi.';
+  if (event.type === 'payment') return 'Webhook SePay xác nhận giao dịch khớp mã thanh toán.';
+  if (event.type.startsWith('admin_')) return 'Thao tác demo từ dashboard admin.';
+  return 'Event kỹ thuật từ hệ thống.';
+}
+
 function buildSlots(sessions: LockerSession[]) {
   return Array.from({ length: LOCKER_COUNT }, (_, index) => {
     const number = index + 1;
@@ -425,6 +468,7 @@ function formatTime(value: string) {
   return new Date(value).toLocaleString('vi-VN', {
     hour: '2-digit',
     minute: '2-digit',
+    second: '2-digit',
     day: '2-digit',
     month: '2-digit',
   });
