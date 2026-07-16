@@ -18,6 +18,9 @@ enum AccessDecision {
   ACCESS_BYPASS
 };
 
+enum PaymentResult { PAYMENT_OK, PAYMENT_CANCELLED, PAYMENT_FAILED };
+enum ParkingResult { PARKING_ALLOW, PARKING_DENY, PARKING_BYPASS };
+
 struct AccessCheck {
   AccessDecision decision;
   String paymentId;
@@ -64,6 +67,7 @@ const unsigned long HTTP_TIMEOUT = 5000;
 const unsigned long HEARTBEAT_EVERY = 10000;
 const unsigned long PAYMENT_POLL_EVERY = 2000;
 const unsigned long PAYMENT_POLL_TIMEOUT = 120000;
+const unsigned long PAYMENT_CHOICE_TIMEOUT = 60000;
 const int QR_MAX_VERSION = 6;
 byte qrDrawX = 0;
 byte qrDrawY = 0;
@@ -84,6 +88,7 @@ Preferences preferences;
 unsigned long lastHeartbeatAt = 0;
 bool serverOnline = false;
 bool idleVisible = false;
+String unoLine = "";
 
 void setup() {
   Serial.begin(115200);
@@ -125,35 +130,39 @@ void loop() {
 }
 
 void readUnoRequest() {
-  static String line = "";
+  String line;
+  while (readUnoLine(line))
+    processRequest(line);
+}
 
+bool readUnoLine(String &line) {
   while (UnoSerial.available()) {
     char c = UnoSerial.read();
+    if (c == '\r') continue;
 
     if (c == '\n') {
-      line.trim();
-      if (line.length() > 0)
-        processRequest(line);
-      line = "";
+      unoLine.trim();
+      line = unoLine;
+      unoLine = "";
+      if (line.length() > 0) return true;
       continue;
     }
 
-    if (c == '\r')
-      continue;
-
-    if (line.length() >= REQUEST_MAX_LENGTH) {
-      line = "";
-      report(false, 0, "BAD_REQUEST", "LOI YEU CAU");
+    if (unoLine.length() >= REQUEST_MAX_LENGTH) {
+      unoLine = "";
       continue;
     }
-
-    line += c;
+    unoLine += c;
   }
+  return false;
 }
 
 void processRequest(const String &request) {
   Serial.print(F("Nhan Uno: "));
   Serial.println(request);
+
+  // KEY chi co y nghia luc ESP dang cho chon thanh toan, gui nham o idle thi bo qua
+  if (request.startsWith("KEY|")) return;
 
   // chi nhan dung format tu Uno: REQ|MODE|UID, sai thi bo luon cho de debug
   if (!request.startsWith("REQ|") || request.length() < 7 ||

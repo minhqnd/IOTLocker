@@ -1,3 +1,4 @@
+import { isPaymentSettled, type LockerSession } from '@/lib/locker';
 import { supabase } from '@/lib/supabase';
 
 export const dynamic = 'force-dynamic';
@@ -13,7 +14,7 @@ export async function GET(request: Request) {
 
     const { data: session, error } = await supabase
       .from('locker_sessions')
-      .select('id, payment_status, locker_number')
+      .select('id, payment_status, payment_method, locker_number')
       .eq('payment_id', paymentId)
       .maybeSingle();
 
@@ -25,13 +26,14 @@ export async function GET(request: Request) {
       return Response.json({ ok: false, error: 'Payment not found' }, { status: 404 });
     }
 
-    const paid = session.payment_status === 'paid' || session.payment_status === 'waived';
+    const paid = isPaymentSettled(session.payment_status as LockerSession['payment_status']);
     return Response.json({
       ok: true,
       paid,
       allowOpen: paid,
       locker: session.locker_number,
       paymentStatus: session.payment_status,
+      paymentMethod: session.payment_method,
     });
   } catch (error: unknown) {
     return Response.json({ ok: false, error: error instanceof Error ? error.message : 'Internal Server Error' }, { status: 500 });

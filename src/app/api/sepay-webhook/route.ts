@@ -48,6 +48,7 @@ export async function POST(request: Request) {
       .from('locker_sessions')
       .update({
         payment_status: 'paid',
+        payment_method: 'sepay',
         paid_at: now,
         updated_at: now,
       })

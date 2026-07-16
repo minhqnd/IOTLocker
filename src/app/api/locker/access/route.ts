@@ -2,6 +2,7 @@ import {
   ensurePayment,
   findActiveSession,
   isOverdue,
+  isPaymentSettled,
   qrPayloadFor,
   sessionResponse,
   touchLocker,
@@ -33,8 +34,8 @@ export async function GET(request: Request) {
     }
 
     const overdue = isOverdue(session.deposited_at);
-    const paid = session.payment_status === 'paid' || session.payment_status === 'waived';
-    if (!overdue || paid) {
+    const settled = isPaymentSettled(session.payment_status);
+    if (!overdue || settled) {
       await supabase
         .from('events')
         .insert({
@@ -43,7 +44,7 @@ export async function GET(request: Request) {
           uid,
           locker_number: session.locker_number,
           session_id: session.id,
-          payload: { mode, overdue, paid },
+          payload: { mode, overdue, paid: settled, paymentMethod: session.payment_method },
         });
 
       return Response.json(
@@ -51,7 +52,7 @@ export async function GET(request: Request) {
           ok: true,
           found: true,
           overdue,
-          paid,
+          paid: settled,
           allowOpen: true,
         })
       );

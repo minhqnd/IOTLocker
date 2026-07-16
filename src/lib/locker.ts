@@ -13,7 +13,8 @@ export type LockerSession = {
   deposited_at: string;
   picked_up_at: string | null;
   is_active: boolean;
-  payment_status: 'none' | 'pending' | 'paid' | 'waived';
+  payment_status: 'none' | 'pending' | 'paid' | 'waived' | 'deferred';
+  payment_method: 'sepay' | 'parking' | 'counter' | null;
   payment_id: string | null;
   fee_amount: number;
   paid_at: string | null;
@@ -88,6 +89,10 @@ export async function ensurePayment(session: LockerSession) {
 
   if (error) throw error;
   return data;
+}
+
+export function isPaymentSettled(status: LockerSession['payment_status']) {
+  return status === 'paid' || status === 'waived' || status === 'deferred';
 }
 
 export function qrPayloadFor(session: LockerSession) {

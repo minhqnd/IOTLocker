@@ -63,6 +63,18 @@ void readKeypad() {
   char key = keypad.getKey();
   if (!key) return;
 
+  if (key == '*' && mode != 0) {
+    mode = 0;
+    uidBuffer = "";
+    showMenu();
+    return;
+  }
+
+  if (key == '1' || key == '2' || key == '*') {
+    sendKey(key);
+    return;
+  }
+
   if (key == 'A' || key == 'B' || key == 'C' || key == 'D') {
     mode = key;
     uidBuffer = "";
@@ -72,6 +84,17 @@ void readKeypad() {
   }
 
   // If the user picked the wrong action, pressing A/B/C/D again replaces it.
+}
+
+void sendKey(char key) {
+  espSerial.listen();
+  delay(30);
+  espSerial.print(F("KEY|"));
+  espSerial.println(key);
+
+  Serial.print(F("KEY|"));
+  Serial.println(key);
+  rfidSerial.listen();
 }
 
 String readUid() {

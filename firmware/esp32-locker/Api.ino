@@ -138,11 +138,14 @@ bool canContinueAfterAccess(const AccessCheck &access, int locker,
     return true;
 
   if (access.decision == ACCESS_NEED_PAYMENT) {
-    bool paid = waitForPayment(access.paymentId, access.qrPayload, access.fee);
-    if (paid)
+    PaymentResult result = choosePayment(access, uid);
+    if (result == PAYMENT_OK)
       return true;
 
-    report(false, locker + 1, "PAY_TIMEOUT", "CHUA THANH TOAN");
+    if (result == PAYMENT_CANCELLED)
+      report(false, locker + 1, "PAY_CANCEL", "DA HUY");
+    else
+      report(false, locker + 1, "PAY_TIMEOUT", "CHUA THANH TOAN");
     return false;
   }
 
@@ -150,6 +153,56 @@ bool canContinueAfterAccess(const AccessCheck &access, int locker,
   Serial.print(F("[ACCESS DENY] UID="));
   Serial.println(uid);
   return false;
+}
+
+PaymentResult choosePayment(const AccessCheck &access, const String &uid) {
+  unsigned long startedAt = millis();
+  showPaymentMenu(access.fee);
+
+  while (millis() - startedAt < PAYMENT_CHOICE_TIMEOUT) {
+    char key = readPaymentKey();
+    if (key == '*') return PAYMENT_CANCELLED;
+    if (key == '1')
+      return waitForPayment(access.paymentId, access.qrPayload, access.fee);
+
+    if (key == '2') {
+      ParkingResult parking = deferPaymentToParking(uid, access.paymentId);
+      if (parking == PARKING_ALLOW || parking == PARKING_BYPASS) {
+        showText(parking == PARKING_ALLOW ? "THE XE HOP LE" : "DANG XU LY",
+                 "Dang mo...");
+        return PAYMENT_OK;
+      }
+      showText("KHONG PHAI THE XE", "Ra quay thanh toan");
+      delay(2500);
+      showPaymentMenu(access.fee);
+    }
+    delay(20);
+  }
+  return PAYMENT_FAILED;
+}
+
+char readPaymentKey() {
+  String line;
+  if (!readUnoLine(line) || !line.startsWith("KEY|") || line.length() != 5)
+    return 0;
+  return line.charAt(4);
+}
+
+ParkingResult deferPaymentToParking(const String &uid,
+                                    const String &paymentId) {
+  if (!ensureWifi()) return PARKING_BYPASS;
+
+  StaticJsonDocument<192> bodyDoc;
+  bodyDoc["deviceId"] = DEVICE_ID;
+  bodyDoc["uid"] = uid;
+  bodyDoc["paymentId"] = paymentId;
+  bodyDoc["choice"] = "parking";
+
+  StaticJsonDocument<512> response;
+  String body = httpPost("/api/locker/payment-choice", toJson(bodyDoc));
+  if (body.length() == 0 || !parseJson(body, response))
+    return PARKING_BYPASS;
+  return (response["allowOpen"] | false) ? PARKING_ALLOW : PARKING_DENY;
 }
 
 bool isPaymentReady(const String &paymentId) {
@@ -168,22 +221,26 @@ bool isPaymentReady(const String &paymentId) {
   return paid;
 }
 
-bool waitForPayment(const String &paymentId, const String &qrPayload, int fee) {
+PaymentResult waitForPayment(const String &paymentId, const String &qrPayload,
+                             int fee) {
   if (paymentId.length() == 0)
-    return false;
+    return PAYMENT_FAILED;
 
   unsigned long startedAt = millis();
   while (millis() - startedAt < PAYMENT_POLL_TIMEOUT) {
     showPayment(paymentId, qrPayload, fee);
 
+    if (readPaymentKey() == '*')
+      return PAYMENT_CANCELLED;
+
     if (!ensureWifi()) {
       Serial.println(F("[PAY] mat mang luc cho, bypass"));
-      return true;
+      return PAYMENT_OK;
     }
 
     if (isPaymentReady(paymentId)) {
       showText("DA THANH TOAN", "Dang mo...");
-      return true;
+      return PAYMENT_OK;
     }
 
     delay(PAYMENT_POLL_EVERY);
@@ -192,11 +249,11 @@ bool waitForPayment(const String &paymentId, const String &qrPayload, int fee) {
   // Co luc webhook ve sat nut timeout, check them lan cuoi truoc khi bao fail.
   if (isPaymentReady(paymentId)) {
     showText("DA THANH TOAN", "Dang mo...");
-    return true;
+    return PAYMENT_OK;
   }
 
   Serial.println(F("[PAY] het gio cho thanh toan"));
-  return false;
+  return PAYMENT_FAILED;
 }
 
 String httpGet(const String &path) { return httpRequest("GET", path, ""); }

@@ -7,6 +7,7 @@ create table if not exists locker_sessions (
   picked_up_at timestamptz,
   is_active boolean not null default true,
   payment_status text not null default 'none',
+  payment_method text,
   payment_id text unique,
   fee_amount integer not null default 0,
   paid_at timestamptz,
@@ -45,6 +46,8 @@ create table if not exists parking_cards (
   note text,
   created_at timestamptz not null default now()
 );
+
+alter table locker_sessions add column if not exists payment_method text;
 
 grant usage on schema public to anon;
 grant select on table locker_sessions, lockers, events to anon;

@@ -76,6 +76,17 @@ void showPayment(const String &paymentId, const String &qrPayload, int fee) {
   display.display();
 }
 
+void showPaymentMenu(int fee) {
+  if (!oledReady) return;
+  idleVisible = false;
+  display.clearDisplay();
+  drawLine(1, 0, "PHI: " + String(fee) + " VND");
+  drawLine(1, 16, "1: QUET QR");
+  drawLine(1, 32, "2: TRA KHI LAY XE");
+  drawLine(1, 48, "*: HUY");
+  display.display();
+}
+
 void drawQr(const String &payload, byte x, byte y) {
   qrDrawX = x;
   qrDrawY = y;

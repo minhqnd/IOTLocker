@@ -16,6 +16,7 @@ type LockerSession = {
   picked_up_at: string | null;
   is_active: boolean;
   payment_status: string;
+  payment_method: string | null;
   payment_id: string | null;
   fee_amount: number;
 };
@@ -39,6 +40,14 @@ type AdminData = {
   sessions: LockerSession[];
   lockers: Locker[];
   events: EventLog[];
+  parkingCards: ParkingCard[];
+};
+
+type ParkingCard = {
+  uid: string;
+  active: boolean;
+  note: string | null;
+  created_at: string;
 };
 
 type LockerSlot = {
@@ -47,13 +56,14 @@ type LockerSlot = {
 };
 
 export default function AdminPage() {
-  const [data, setData] = useState<AdminData>({ sessions: [], lockers: [], events: [] });
+  const [data, setData] = useState<AdminData>({ sessions: [], lockers: [], events: [], parkingCards: [] });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(0);
   const [realtimeStatus, setRealtimeStatus] = useState('Đang nối');
   const [lastRealtimeAt, setLastRealtimeAt] = useState<number | null>(null);
+  const [parkingUid, setParkingUid] = useState('');
   const realtimeReloadTimer = useRef<number | null>(null);
 
   async function loadData() {
@@ -61,7 +71,7 @@ export default function AdminPage() {
       const response = await fetch('/api/admin-data', { cache: 'no-store' });
       const json = await response.json();
       if (!response.ok || !json.ok) throw new Error(json.error || 'Cannot load dashboard');
-      setData({ sessions: json.sessions, lockers: json.lockers, events: json.events });
+      setData({ sessions: json.sessions, lockers: json.lockers, events: json.events, parkingCards: json.parkingCards });
       setError('');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Cannot load dashboard');
@@ -89,15 +99,44 @@ export default function AdminPage() {
     }
   }
 
+  async function setParkingCard(uid: string, active: boolean) {
+    const normalizedUid = uid.trim().toUpperCase();
+    setBusy(`parking:${normalizedUid}`);
+    try {
+      const response = await fetch('/api/parking-card', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uid: normalizedUid, active }),
+      });
+      const json = await response.json();
+      if (!response.ok || !json.ok) throw new Error(json.error || 'Không cập nhật được thẻ xe');
+      setParkingUid('');
+      await loadData();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Không cập nhật được thẻ xe');
+    } finally {
+      setBusy('');
+    }
+  }
+
   useEffect(() => {
-    void loadData();
+    const startupTimer = window.setTimeout(() => {
+      setNow(Date.now());
+      void loadData();
+    }, 0);
     const clockTimer = setInterval(() => setNow(Date.now()), 1000);
     const supabase = createBrowserSupabase();
 
     if (!supabase) {
-      setRealtimeStatus('Thiếu env');
-      setError('Realtime chưa có public Supabase env, dashboard chỉ tải snapshot ban đầu.');
-      return () => clearInterval(clockTimer);
+      const missingEnvTimer = window.setTimeout(() => {
+        setRealtimeStatus('Thiếu env');
+        setError('Realtime chưa có public Supabase env, dashboard chỉ tải snapshot ban đầu.');
+      }, 0);
+      return () => {
+        clearInterval(clockTimer);
+        window.clearTimeout(startupTimer);
+        window.clearTimeout(missingEnvTimer);
+      };
     }
 
     function refreshFromRealtime() {
@@ -127,6 +166,7 @@ export default function AdminPage() {
 
     return () => {
       clearInterval(clockTimer);
+      window.clearTimeout(startupTimer);
       if (realtimeReloadTimer.current) window.clearTimeout(realtimeReloadTimer.current);
       window.removeEventListener('focus', loadData);
       document.removeEventListener('visibilitychange', refreshWhenFocused);
@@ -184,6 +224,52 @@ export default function AdminPage() {
         </section>
 
         <section className="mt-6 grid gap-6">
+          <Panel title="Thẻ xe">
+            <form
+              className="flex flex-col gap-3 sm:flex-row"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void setParkingCard(parkingUid, true);
+              }}
+            >
+              <label className="flex-1">
+                <span className="sr-only">UID thẻ xe</span>
+                <input
+                  value={parkingUid}
+                  onChange={(event) => setParkingUid(event.target.value.toUpperCase())}
+                  placeholder="Nhập UID thẻ xe, ví dụ 3A005D97A5"
+                  maxLength={14}
+                  className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 font-mono text-sm outline-none focus:border-zinc-500"
+                />
+              </label>
+              <button
+                disabled={!parkingUid.trim() || busy.startsWith('parking:')}
+                className="h-10 rounded-md bg-zinc-900 px-4 text-sm font-medium text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Đánh dấu là thẻ xe
+              </button>
+            </form>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              {data.parkingCards.filter((card) => card.active).length === 0 ? (
+                <p className="text-sm text-zinc-500">Chưa có UID nào được đánh dấu là thẻ xe.</p>
+              ) : data.parkingCards.filter((card) => card.active).map((card) => (
+                <div key={card.uid} className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 pl-3 pr-1">
+                  <span className="font-mono text-sm">{card.uid}</span>
+                  <button
+                    type="button"
+                    title="Bỏ đánh dấu thẻ xe"
+                    disabled={busy === `parking:${card.uid}`}
+                    onClick={() => void setParkingCard(card.uid, false)}
+                    className="grid size-7 place-items-center rounded text-lg text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          </Panel>
+
           <Panel title="Phiên gửi đồ">
             {loading ? (
               <Empty>Đang tải...</Empty>
@@ -365,6 +451,7 @@ function Payment({ session, now }: { session: LockerSession; now: number }) {
     <div>
       <span className={`rounded-md px-2.5 py-1 text-xs font-medium ${color}`}>{paymentLabel(session.payment_status, overdue)}</span>
       {session.payment_id && <p className="mt-1 font-mono text-xs text-zinc-500">{session.payment_id} · {session.fee_amount.toLocaleString('vi-VN')}đ</p>}
+      {session.payment_method && <p className="mt-1 text-xs text-zinc-500">{paymentMethodLabel(session.payment_method)}</p>}
     </div>
   );
 }
@@ -393,6 +480,9 @@ function eventTitle(event: EventLog) {
     admin_paid: 'Admin đánh dấu đã thanh toán',
     admin_pickup: 'Admin kết thúc phiên',
     admin_pending: 'Admin tạo yêu cầu thanh toán',
+    parking_deferred: 'Ghi nợ vào thẻ xe',
+    parking_card_added: 'Đánh dấu thẻ xe',
+    parking_card_disabled: 'Bỏ đánh dấu thẻ xe',
   };
 
   if (event.type === 'access_allow') {
@@ -419,6 +509,9 @@ function eventDescription(event: EventLog) {
   if (event.type === 'deposit') return 'ESP báo đã tạo phiên gửi đồ mới.';
   if (event.type === 'pickup') return 'ESP báo user đã lấy đồ, server đóng phiên gửi.';
   if (event.type === 'payment') return 'Webhook SePay xác nhận giao dịch khớp mã thanh toán.';
+  if (event.type === 'parking_deferred') return 'UID hợp lệ trong danh sách thẻ xe; phí được chuyển sang thu tại cổng xe.';
+  if (event.type === 'parking_card_added') return 'UID được phép chọn trả phí khi lấy xe.';
+  if (event.type === 'parking_card_disabled') return 'UID không còn được dùng lựa chọn trả phí khi lấy xe.';
   if (event.type.startsWith('admin_')) return 'Thao tác demo từ dashboard admin.';
   return 'Event kỹ thuật từ hệ thống.';
 }
@@ -435,6 +528,7 @@ function buildSlots(sessions: LockerSession[]) {
 
 function paymentColor(status: string, overdue: boolean) {
   if (status === 'paid') return 'bg-emerald-50 text-emerald-700';
+  if (status === 'deferred') return 'bg-blue-50 text-blue-700';
   if (status === 'pending' || overdue) return 'bg-amber-50 text-amber-700';
   return 'bg-zinc-100 text-zinc-700';
 }
@@ -443,8 +537,16 @@ function paymentLabel(status: string, overdue: boolean) {
   if (status === 'paid') return 'Đã thanh toán';
   if (status === 'pending') return 'Chờ thanh toán';
   if (status === 'waived') return 'Bỏ qua phí';
+  if (status === 'deferred') return 'Trả khi lấy xe';
   if (overdue) return 'Cần thanh toán';
   return 'Chưa cần TT';
+}
+
+function paymentMethodLabel(method: string) {
+  if (method === 'sepay') return 'Qua SePay';
+  if (method === 'parking') return 'Ghi nợ tại cổng xe';
+  if (method === 'counter') return 'Đã thu tại quầy';
+  return method;
 }
 
 function isOverdue(value: string, now: number) {

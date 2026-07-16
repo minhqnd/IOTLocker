@@ -33,7 +33,7 @@ export async function POST(request: Request) {
     if (!session) return Response.json({ ok: false, error: 'Active session not found' }, { status: 404 });
 
     if (action === 'overdue') return markOverdue(session.id, deviceId, locker);
-    if (action === 'paid') return updateSession(session.id, { payment_status: 'paid', paid_at: new Date().toISOString() }, action, deviceId, locker);
+    if (action === 'paid') return updateSession(session.id, { payment_status: 'paid', payment_method: 'counter', paid_at: new Date().toISOString() }, action, deviceId, locker);
     if (action === 'pending') {
       const payableSession = await ensurePayment(session);
       await logEvent('admin_pending', { device_id: deviceId, uid: session.uid, locker_number: locker, session_id: session.id });
@@ -99,6 +99,7 @@ async function markOverdue(sessionId: string, deviceId: string, locker: number) 
       payment_id: null,
       fee_amount: 0,
       paid_at: null,
+      payment_method: null,
       updated_at: now,
     })
     .eq('id', sessionId)
