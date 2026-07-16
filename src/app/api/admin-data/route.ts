@@ -1,4 +1,5 @@
 import { supabase } from '@/lib/supabase';
+import { isDeviceOnline } from '@/lib/device-status';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +19,10 @@ export async function GET() {
     return Response.json({
       ok: true,
       sessions: sessionsResult.data || [],
-      lockers: lockersResult.data || [],
+      lockers: (lockersResult.data || []).map((locker) => ({
+        ...locker,
+        online: isDeviceOnline(locker.last_seen),
+      })),
       events: eventsResult.data || [],
     });
   } catch (error: unknown) {

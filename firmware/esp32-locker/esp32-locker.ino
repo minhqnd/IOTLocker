@@ -61,7 +61,7 @@ const char DEVICE_ID[] = "locker-01";
 
 const unsigned long WIFI_TIMEOUT = 7000;
 const unsigned long HTTP_TIMEOUT = 5000;
-const unsigned long HEARTBEAT_EVERY = 60000;
+const unsigned long HEARTBEAT_EVERY = 10000;
 const unsigned long PAYMENT_POLL_EVERY = 2000;
 const unsigned long PAYMENT_POLL_TIMEOUT = 120000;
 const int QR_MAX_VERSION = 6;
@@ -529,12 +529,14 @@ void drawQr(const String &payload, byte x, byte y) {
 void drawQrModules(esp_qrcode_handle_t qrcode) {
   int size = esp_qrcode_get_size(qrcode);
   byte border = 2;
-  display.fillRect(qrDrawX, qrDrawY, size + border * 2, size + border * 2, SSD1306_WHITE);
+  display.fillRect(qrDrawX, qrDrawY, size + border * 2, size + border * 2,
+                   SSD1306_WHITE);
 
   for (int qrY = 0; qrY < size; qrY++) {
     for (int qrX = 0; qrX < size; qrX++) {
       if (esp_qrcode_get_module(qrcode, qrX, qrY)) {
-        display.drawPixel(qrDrawX + qrX + border, qrDrawY + qrY + border, SSD1306_BLACK);
+        display.drawPixel(qrDrawX + qrX + border, qrDrawY + qrY + border,
+                          SSD1306_BLACK);
       }
     }
   }
