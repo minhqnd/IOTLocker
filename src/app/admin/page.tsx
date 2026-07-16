@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createBrowserSupabase } from '@/lib/supabase-browser';
 
 const DEVICE_ID = 'locker-01';
@@ -50,6 +50,9 @@ export default function AdminPage() {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [now, setNow] = useState(Date.now());
+  const [realtimeStatus, setRealtimeStatus] = useState('Đang nối');
+  const [lastRealtimeAt, setLastRealtimeAt] = useState<number | null>(null);
+  const realtimeReloadTimer = useRef<number | null>(null);
 
   async function loadData() {
     try {
@@ -90,21 +93,41 @@ export default function AdminPage() {
     const supabase = createBrowserSupabase();
 
     if (!supabase) {
+      setRealtimeStatus('Thiếu env');
       setError('Realtime chưa có public Supabase env, dashboard chỉ tải snapshot ban đầu.');
       return () => clearInterval(clockTimer);
     }
 
+    function refreshFromRealtime() {
+      setLastRealtimeAt(Date.now());
+      if (realtimeReloadTimer.current) window.clearTimeout(realtimeReloadTimer.current);
+      realtimeReloadTimer.current = window.setTimeout(() => void loadData(), 150);
+    }
+
+    function refreshWhenFocused() {
+      if (document.visibilityState === 'visible') void loadData();
+    }
+
     const channel = supabase
       .channel('admin-dashboard')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'locker_sessions' }, () => void loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'lockers' }, () => void loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => void loadData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'locker_sessions' }, refreshFromRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'lockers' }, refreshFromRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, refreshFromRealtime)
       .subscribe((status) => {
+        if (status === 'SUBSCRIBED') setRealtimeStatus('Realtime OK');
         if (status === 'CHANNEL_ERROR') setError('Realtime chưa kết nối được, bấm Làm mới nếu cần.');
+        if (status === 'CHANNEL_ERROR') setRealtimeStatus('Realtime lỗi');
+        if (status === 'TIMED_OUT') setRealtimeStatus('Realtime timeout');
       });
+
+    window.addEventListener('focus', loadData);
+    document.addEventListener('visibilitychange', refreshWhenFocused);
 
     return () => {
       clearInterval(clockTimer);
+      if (realtimeReloadTimer.current) window.clearTimeout(realtimeReloadTimer.current);
+      window.removeEventListener('focus', loadData);
+      document.removeEventListener('visibilitychange', refreshWhenFocused);
       void supabase.removeChannel(channel);
     };
   }, []);
@@ -129,6 +152,10 @@ export default function AdminPage() {
           >
             Làm mới
           </button>
+          <p className="text-xs text-zinc-500">
+            {realtimeStatus}
+            {lastRealtimeAt ? ` · ${formatClock(lastRealtimeAt)}` : ''}
+          </p>
         </header>
 
         {error && <div className="mb-5 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
@@ -177,7 +204,7 @@ export default function AdminPage() {
                         <td className="py-2 pr-3 font-mono">{session.uid}</td>
                         <td className="py-2 pr-3">Hộc {session.locker_number}</td>
                         <td className="py-2 pr-3"><Status active={session.is_active} /></td>
-                        <td className="py-2 pr-3"><Payment session={session} /></td>
+                        <td className="py-2 pr-3"><Payment session={session} now={now} /></td>
                         <td className="py-2 pr-3 font-mono text-zinc-700">{session.is_active ? elapsed(session.deposited_at, now) : '-'}</td>
                         <td className="py-2 pr-3 text-zinc-600">{formatTime(session.deposited_at)}</td>
                       </tr>
@@ -237,7 +264,7 @@ function LockerCard({ slot, now, busy, onAction }: { slot: LockerSlot; now: numb
             <p className="text-xs text-zinc-500">Đang gửi</p>
             <p className="font-mono text-2xl font-semibold">{elapsed(session.deposited_at, now)}</p>
           </div>
-          <Payment session={session} />
+          <Payment session={session} now={now} />
         </div>
       ) : (
         <Empty>Chưa có đồ trong hộc này.</Empty>
@@ -301,11 +328,12 @@ function Status({ active }: { active: boolean }) {
   );
 }
 
-function Payment({ session }: { session: LockerSession }) {
-  const color = session.payment_status === 'paid' ? 'bg-emerald-50 text-emerald-700' : session.payment_status === 'pending' ? 'bg-amber-50 text-amber-700' : 'bg-zinc-100 text-zinc-700';
+function Payment({ session, now }: { session: LockerSession; now: number }) {
+  const overdue = session.is_active && isOverdue(session.deposited_at, now);
+  const color = paymentColor(session.payment_status, overdue);
   return (
     <div>
-      <span className={`rounded px-2 py-1 text-xs ${color}`}>{paymentLabel(session.payment_status)}</span>
+      <span className={`rounded px-2 py-1 text-xs ${color}`}>{paymentLabel(session.payment_status, overdue)}</span>
       {session.payment_id && <p className="mt-1 font-mono text-xs text-zinc-500">{session.payment_id} · {session.fee_amount.toLocaleString('vi-VN')}đ</p>}
     </div>
   );
@@ -321,10 +349,17 @@ function buildSlots(sessions: LockerSession[]) {
   });
 }
 
-function paymentLabel(status: string) {
+function paymentColor(status: string, overdue: boolean) {
+  if (status === 'paid') return 'bg-emerald-50 text-emerald-700';
+  if (status === 'pending' || overdue) return 'bg-amber-50 text-amber-700';
+  return 'bg-zinc-100 text-zinc-700';
+}
+
+function paymentLabel(status: string, overdue: boolean) {
   if (status === 'paid') return 'Đã thanh toán';
   if (status === 'pending') return 'Chờ thanh toán';
   if (status === 'waived') return 'Bỏ qua phí';
+  if (overdue) return 'Cần thanh toán';
   return 'Chưa cần TT';
 }
 
@@ -351,5 +386,13 @@ function formatTime(value: string) {
     minute: '2-digit',
     day: '2-digit',
     month: '2-digit',
+  });
+}
+
+function formatClock(value: number) {
+  return new Date(value).toLocaleTimeString('vi-VN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
   });
 }

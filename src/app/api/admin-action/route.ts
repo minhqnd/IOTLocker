@@ -32,7 +32,7 @@ export async function POST(request: Request) {
     if (error) return Response.json({ ok: false, error: error.message }, { status: 500 });
     if (!session) return Response.json({ ok: false, error: 'Active session not found' }, { status: 404 });
 
-    if (action === 'overdue') return updateSession(session.id, { deposited_at: minutesAgo(OVERDUE_MINUTES), payment_status: 'none', fee_amount: 0 }, action, deviceId, locker);
+    if (action === 'overdue') return markOverdue(session.id, deviceId, locker);
     if (action === 'paid') return updateSession(session.id, { payment_status: 'paid', paid_at: new Date().toISOString() }, action, deviceId, locker);
     if (action === 'pending') {
       const payableSession = await ensurePayment(session);
@@ -87,6 +87,35 @@ async function updateSession(
   if (error) return Response.json({ ok: false, error: error.message }, { status: 500 });
   await logEvent(`admin_${action}`, { device_id: deviceId, uid: data.uid, locker_number: locker, session_id: sessionId });
   return Response.json({ ok: true });
+}
+
+async function markOverdue(sessionId: string, deviceId: string, locker: number) {
+  const now = new Date().toISOString();
+  const { data: overdueSession, error } = await supabase
+    .from('locker_sessions')
+    .update({
+      deposited_at: minutesAgo(OVERDUE_MINUTES),
+      payment_status: 'none',
+      payment_id: null,
+      fee_amount: 0,
+      paid_at: null,
+      updated_at: now,
+    })
+    .eq('id', sessionId)
+    .select()
+    .single();
+
+  if (error) return Response.json({ ok: false, error: error.message }, { status: 500 });
+
+  const payableSession = await ensurePayment(overdueSession);
+  await logEvent('admin_overdue', {
+    device_id: deviceId,
+    uid: overdueSession.uid,
+    locker_number: locker,
+    session_id: sessionId,
+  });
+
+  return Response.json({ ok: true, paymentId: payableSession.payment_id });
 }
 
 function minutesAgo(minutes: number) {
