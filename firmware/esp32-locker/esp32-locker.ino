@@ -111,6 +111,7 @@ void setup() {
 
   ensureWifi();
   sendHeartbeat();
+  postLockerState();
   printLockerState();
   showIdle();
   Serial.println(F("ESP32 V2 READY"));
@@ -189,6 +190,7 @@ void processRequest(const String &request) {
 
   beepScanOk();
   showText("DA NHAN THE", "Dang xu ly...");
+  postLockerState();
 
   if (mode == 'A')
     handleDeposit(uid);
@@ -234,6 +236,7 @@ void handleDeposit(const String &uid) {
 
   report(true, locker + 1, "DEPOSIT_OK", "GUI THANH CONG");
   postDeposit(uid, locker);
+  postLockerState();
   printLockerState();
 }
 
@@ -274,8 +277,10 @@ void handleExistingLocker(const String &uid, char mode, const char *title,
     lockerUid[locker] = "";
     saveLocker(locker);
     postPickup(uid);
+    postLockerState();
   } else {
     logEvent("reopen", uid, locker);
+    postLockerState();
   }
 
   printLockerState();
@@ -590,8 +595,32 @@ void sendHeartbeat() {
   serverOnline = postJsonOk("/api/locker/heartbeat", bodyDoc);
   Serial.print(F("[API] heartbeat "));
   Serial.println(serverOnline ? F("ok") : F("fail"));
+  if (serverOnline)
+    postLockerState();
   if (idleVisible)
     showIdle();
+}
+
+bool postLockerState() {
+  if (!ensureWifi())
+    return false;
+
+  StaticJsonDocument<512> bodyDoc;
+  bodyDoc["deviceId"] = DEVICE_ID;
+  JsonArray lockers = bodyDoc.createNestedArray("lockers");
+  for (int i = 0; i < LOCKER_COUNT; i++) {
+    if (lockerUid[i].length() == 0)
+      continue;
+
+    JsonObject item = lockers.createNestedObject();
+    item["locker"] = i + 1;
+    item["uid"] = lockerUid[i];
+  }
+
+  bool ok = postJsonOk("/api/locker/state", bodyDoc);
+  Serial.print(F("[SYNC] local -> server "));
+  Serial.println(ok ? F("ok") : F("fail"));
+  return ok;
 }
 
 void postDeposit(const String &uid, int locker) {
