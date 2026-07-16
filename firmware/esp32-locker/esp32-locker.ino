@@ -57,7 +57,7 @@ HardwareSerial UnoSerial(2);
 // Sua 3 dong nay truoc khi nap len ESP32.
 const char WIFI_SSID[] = "YOUR_WIFI";
 const char WIFI_PASSWORD[] = "YOUR_PASSWORD";
-const char API_BASE_URL[] = "https://your-vercel-app.vercel.app";
+const char API_BASE_URL[] = "https://iot-locker.vercel.app";
 const char DEVICE_ID[] = "locker-01";
 
 const unsigned long WIFI_TIMEOUT = 7000;
