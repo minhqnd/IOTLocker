@@ -1,16 +1,14 @@
-#include <Preferences.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <ESP32Servo.h>
-#include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <ArduinoJson.h>
+#include <ESP32Servo.h>
+#include <HTTPClient.h>
+#include <Preferences.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <ctype.h>
 
-enum DoorResult {
-  DOOR_OK,
-  DOOR_NOT_OPENED,
-  DOOR_LEFT_OPEN
-};
+enum DoorResult { DOOR_OK, DOOR_NOT_OPENED, DOOR_LEFT_OPEN };
 
 enum AccessDecision {
   ACCESS_ALLOW,
@@ -34,7 +32,7 @@ const int DOOR_PINS[LOCKER_COUNT] = {19, 27};
 const int SERVO_LOCK_ANGLE = 90;
 const int SERVO_UNLOCK_ANGLE = 0;
 
-// nam cham gan cam bien = cua dong = LOW
+// KY-003 + INPUT_PULLUP: nam cham gan cam bien = cua dong = LOW
 const int DOOR_CLOSED_STATE = LOW;
 const int DOOR_OPEN_STATE = HIGH;
 
@@ -54,7 +52,6 @@ const int UNO_RX_PIN = 16;
 const int UNO_TX_PIN = 17;
 HardwareSerial UnoSerial(2);
 
-// Sua 3 dong nay truoc khi nap len ESP32.
 const char WIFI_SSID[] = "YOUR_WIFI";
 const char WIFI_PASSWORD[] = "YOUR_PASSWORD";
 const char API_BASE_URL[] = "https://iot-locker.vercel.app";
@@ -78,6 +75,8 @@ Servo lockerServo[LOCKER_COUNT];
 String lockerUid[LOCKER_COUNT];
 Preferences preferences;
 unsigned long lastHeartbeatAt = 0;
+bool serverOnline = false;
+bool idleVisible = false;
 
 void setup() {
   Serial.begin(115200);
@@ -103,10 +102,10 @@ void setup() {
     loadLocker(i);
   }
 
-  printLockerState();
-  showIdle();
   ensureWifi();
   sendHeartbeat();
+  printLockerState();
+  showIdle();
   Serial.println(F("ESP32 V2 READY"));
 }
 
@@ -125,12 +124,14 @@ void readUnoRequest() {
 
     if (c == '\n') {
       line.trim();
-      if (line.length() > 0) processRequest(line);
+      if (line.length() > 0)
+        processRequest(line);
       line = "";
       continue;
     }
 
-    if (c == '\r') continue;
+    if (c == '\r')
+      continue;
 
     if (line.length() >= REQUEST_MAX_LENGTH) {
       line = "";
@@ -146,35 +147,26 @@ void processRequest(const String &request) {
   Serial.print(F("Nhan Uno: "));
   Serial.println(request);
 
-  int separator1 = request.indexOf('|');
-  int separator2 = request.indexOf('|', separator1 + 1);
-
   // chi nhan dung format tu Uno: REQ|MODE|UID, sai thi bo luon cho de debug
-  if (separator1 < 0 || separator2 < 0 || !request.startsWith("REQ|")) {
+  if (!request.startsWith("REQ|") || request.length() < 7 ||
+      request.charAt(5) != '|') {
     report(false, 0, "BAD_REQUEST", "LOI YEU CAU");
     returnToIdle();
     return;
   }
 
-  String modeText = request.substring(separator1 + 1, separator2);
-  String uid = request.substring(separator2 + 1);
-  modeText.trim();
+  char mode = request.charAt(4);
+  String uid = request.substring(6);
   uid.trim();
   uid.toUpperCase();
 
-  if (modeText.length() != 1) {
-    report(false, 0, "BAD_REQUEST", "LOI YEU CAU");
-    returnToIdle();
-    return;
-  }
-
-  char mode = modeText.charAt(0);
   Serial.print(F("UID="));
   Serial.print(uid);
   Serial.print(F(" mode="));
   Serial.println(mode);
 
-  // hard reset - dang demo - cai nay dung se dung master key, hoac dung passcode tu server
+  // hard reset - dang demo - cai nay dung se dung master key, hoac dung
+  // passcode tu server
   if (mode == 'D') {
     beepScanOk();
     handleReset();
@@ -191,10 +183,14 @@ void processRequest(const String &request) {
   beepScanOk();
   showText("DA NHAN THE", "Dang xu ly...");
 
-  if (mode == 'A') handleDeposit(uid);
-  else if (mode == 'B') handleReopen(uid);
-  else if (mode == 'C') handlePickup(uid);
-  else report(false, 0, "BAD_MODE", "SAI CHE DO");
+  if (mode == 'A')
+    handleDeposit(uid);
+  else if (mode == 'B')
+    handleReopen(uid);
+  else if (mode == 'C')
+    handlePickup(uid);
+  else
+    report(false, 0, "BAD_MODE", "SAI CHE DO");
 
   returnToIdle();
 }
@@ -218,7 +214,8 @@ void handleDeposit(const String &uid) {
 
   DoorResult result = openLocker(locker, "CHE DO A: GUI", "Cho do vao");
   if (result != DOOR_OK) {
-    // cua chua tung mo thi coi nhu gui that bai, xoa UID vua luu de hoc van trong
+    // cua chua tung mo thi coi nhu gui that bai, xoa UID vua luu de hoc van
+    // trong
     if (result == DOOR_NOT_OPENED) {
       lockerUid[locker] = "";
       saveLocker(locker);
@@ -234,46 +231,46 @@ void handleDeposit(const String &uid) {
 }
 
 void handleReopen(const String &uid) {
-  int locker = findLockerByUid(uid);
-  if (locker < 0) {
-    report(false, 0, "NOT_FOUND", "THE CHUA GUI DO");
-    return;
-  }
-
-  AccessCheck access = checkServerAccess(uid, 'B');
-  if (!canContinueAfterAccess(access, locker, uid)) return;
-
   // B chi mo lai hoc dang co do, khong doi UID va cung khong xoa trang thai
-  DoorResult result = openLocker(locker, "CHE DO B: THEM", "Them do vao");
-  if (result == DOOR_OK) {
-    report(true, locker + 1, "REOPEN_OK", "THEM THANH CONG");
-    logEvent("reopen", uid, locker);
-  } else {
-    reportDoorError(result, locker);
-  }
+  handleExistingLocker(uid, 'B', "CHE DO B: THEM", "Them do vao", "REOPEN_OK",
+                       "THEM THANH CONG", false);
 }
 
 void handlePickup(const String &uid) {
+  // C la lay do: mo dung hoc, dong cua xong moi xoa UID de hoc trong lai
+  handleExistingLocker(uid, 'C', "CHE DO C: LAY", "Lay do ra", "PICKUP_OK",
+                       "LAY THANH CONG", true);
+}
+
+void handleExistingLocker(const String &uid, char mode, const char *title,
+                          const char *actionText, const char *okCode,
+                          const char *okTitle, bool clearAfterOpen) {
   int locker = findLockerByUid(uid);
   if (locker < 0) {
     report(false, 0, "NOT_FOUND", "THE CHUA GUI DO");
     return;
   }
 
-  AccessCheck access = checkServerAccess(uid, 'C');
-  if (!canContinueAfterAccess(access, locker, uid)) return;
+  AccessCheck access = checkServerAccess(uid, mode);
+  if (!canContinueAfterAccess(access, locker, uid))
+    return;
 
-  // C la lay do: mo dung hoc, dong cua xong moi xoa UID de hoc trong lai
-  DoorResult result = openLocker(locker, "CHE DO C: LAY", "Lay do ra");
+  DoorResult result = openLocker(locker, title, actionText);
   if (result != DOOR_OK) {
     reportDoorError(result, locker);
     return;
   }
 
-  lockerUid[locker] = "";
-  saveLocker(locker);
-  report(true, locker + 1, "PICKUP_OK", "LAY THANH CONG");
-  postPickup(uid);
+  report(true, locker + 1, okCode, okTitle);
+
+  if (clearAfterOpen) {
+    lockerUid[locker] = "";
+    saveLocker(locker);
+    postPickup(uid);
+  } else {
+    logEvent("reopen", uid, locker);
+  }
+
   printLockerState();
 }
 
@@ -318,7 +315,8 @@ bool waitForDoorState(int locker, int wantedState, unsigned long timeout) {
   while (millis() - startedAt < timeout) {
     if (digitalRead(DOOR_PINS[locker]) == wantedState) {
       delay(200);
-      if (digitalRead(DOOR_PINS[locker]) == wantedState) return true;
+      if (digitalRead(DOOR_PINS[locker]) == wantedState)
+        return true;
     }
     delay(20);
   }
@@ -359,11 +357,9 @@ bool waitForDoorClose(int locker) {
 }
 
 void reportDoorError(DoorResult result, int locker) {
-  if (result == DOOR_NOT_OPENED) {
-    report(false, locker + 1, "NOT_OPENED", "CUA KHONG MO");
-  } else {
-    report(false, locker + 1, "DOOR_OPEN", "CUA CHUA DONG");
-  }
+  report(false, locker + 1,
+         result == DOOR_NOT_OPENED ? "NOT_OPENED" : "DOOR_OPEN",
+         result == DOOR_NOT_OPENED ? "CUA KHONG MO" : "CUA CHUA DONG");
 }
 
 void report(bool ok, int lockerNumber, const char *code, const char *title) {
@@ -392,26 +388,23 @@ void saveLocker(int locker) {
   preferences.putString(key.c_str(), lockerUid[locker]);
 }
 
-String lockerKey(int locker) {
-  return "uid" + String(locker);
-}
+String lockerKey(int locker) { return "uid" + String(locker); }
 
 String lockerLabel(int locker) {
   String label = "HOC ";
-  if (locker + 1 < 10) label += "0";
+  if (locker + 1 < 10)
+    label += "0";
   label += String(locker + 1);
   return label;
 }
 
 bool isValidUid(const String &uid) {
-  if (uid.length() < UID_MIN_LENGTH || uid.length() > UID_MAX_LENGTH) return false;
+  if (uid.length() < UID_MIN_LENGTH || uid.length() > UID_MAX_LENGTH)
+    return false;
 
   for (unsigned int i = 0; i < uid.length(); i++) {
-    char c = uid.charAt(i);
-    bool hex = (c >= '0' && c <= '9') ||
-               (c >= 'A' && c <= 'F') ||
-               (c >= 'a' && c <= 'f');
-    if (!hex) return false;
+    if (!isxdigit((unsigned char)uid.charAt(i)))
+      return false;
   }
 
   return true;
@@ -419,17 +412,13 @@ bool isValidUid(const String &uid) {
 
 int findLockerByUid(const String &uid) {
   for (int i = 0; i < LOCKER_COUNT; i++) {
-    if (lockerUid[i] == uid) return i;
+    if (lockerUid[i] == uid)
+      return i;
   }
   return -1;
 }
 
-int findEmptyLocker() {
-  for (int i = 0; i < LOCKER_COUNT; i++) {
-    if (lockerUid[i].length() == 0) return i;
-  }
-  return -1;
-}
+int findEmptyLocker() { return findLockerByUid(""); }
 
 void unlockDoor(int locker) {
   lockerServo[locker].write(SERVO_UNLOCK_ANGLE);
@@ -442,73 +431,79 @@ void lockDoor(int locker) {
 }
 
 void showIdle() {
-  showText("TU GUI DO", "San sang");
+  if (!oledReady)
+    return;
+
+  int used = 0;
+  for (int i = 0; i < LOCKER_COUNT; i++) {
+    if (lockerUid[i].length() > 0)
+      used++;
+  }
+
+  display.clearDisplay();
+  drawLine(1, 0, "TU GUI DO");
+  drawLine(1, 18,
+           "Trong: " + String(LOCKER_COUNT - used) + "/" +
+               String(LOCKER_COUNT));
+  drawLine(1, 32, "Dang dung: " + String(used));
+  drawLine(1, 50, serverOnline ? "Online" : "Offline mode");
+  display.display();
+  idleVisible = true;
 }
 
 void showText(const String &line1, const String &line2) {
-  if (!oledReady) return;
+  if (!oledReady)
+    return;
+  idleVisible = false;
 
   display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 8);
-  display.println(line1);
-  display.setTextSize(2);
-  display.setCursor(0, 30);
-  display.println(line2);
+  drawLine(1, 8, line1);
+  drawLine(2, 30, line2);
   display.display();
 }
 
 void showLockerGuide(int locker, const String &line2, const String &line3) {
-  if (!oledReady) return;
+  if (!oledReady)
+    return;
+  idleVisible = false;
 
   display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.println(lockerLabel(locker));
-  display.setTextSize(1);
-  display.setCursor(0, 30);
-  display.println(line2);
-  display.setCursor(0, 44);
-  display.println(line3);
+  drawLine(2, 0, lockerLabel(locker));
+  drawLine(1, 30, line2);
+  drawLine(1, 44, line3);
   display.display();
 }
 
 void showResult(bool ok, const String &title, int lockerNumber) {
-  if (!oledReady) return;
+  if (!oledReady)
+    return;
+  idleVisible = false;
 
   display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println(ok ? "[OK]" : "[LOI]");
-  display.setCursor(0, 20);
-  display.println(title);
-
-  if (lockerNumber > 0) {
-    display.setTextSize(2);
-    display.setCursor(0, 40);
-    display.println("Hoc " + String(lockerNumber));
-  }
-
+  drawLine(1, 0, ok ? "[OK]" : "[LOI]");
+  drawLine(1, 20, title);
+  if (lockerNumber > 0)
+    drawLine(2, 40, "Hoc " + String(lockerNumber));
   display.display();
 }
 
 void showPayment(const String &paymentId, int fee) {
-  if (!oledReady) return;
+  if (!oledReady)
+    return;
+  idleVisible = false;
 
   display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("CAN THANH TOAN");
-  display.setCursor(0, 18);
-  display.print("Phi: ");
-  display.print(fee);
-  display.println(" VND");
-  display.setCursor(0, 34);
-  display.print("Ma: ");
-  display.println(paymentId);
-  display.setCursor(0, 50);
-  display.println("Cho xac nhan...");
+  drawLine(1, 0, "CAN THANH TOAN");
+  drawLine(1, 18, "Phi: " + String(fee) + " VND");
+  drawLine(1, 34, "Ma: " + paymentId);
+  drawLine(1, 50, "Cho xac nhan...");
   display.display();
+}
+
+void drawLine(byte size, byte y, const String &text) {
+  display.setTextSize(size);
+  display.setCursor(0, y);
+  display.println(text);
 }
 
 void returnToIdle() {
@@ -517,9 +512,9 @@ void returnToIdle() {
 }
 
 bool ensureWifi() {
-  if (WiFi.status() == WL_CONNECTED) return true;
+  if (WiFi.status() == WL_CONNECTED)
+    return true;
 
-  showText("KET NOI MANG", "Dang thu...");
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
@@ -528,26 +523,29 @@ bool ensureWifi() {
     delay(200);
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print(F("[WIFI] "));
-    Serial.println(WiFi.localIP());
-    return true;
-  }
-
-  Serial.println(F("[WIFI] timeout, chay offline"));
-  showText("MAT MANG", "Dung tam");
-  delay(800);
-  return false;
+  bool connected = WiFi.status() == WL_CONNECTED;
+  Serial.print(F("[WIFI] "));
+  Serial.println(connected ? WiFi.localIP().toString()
+                           : "timeout, chay offline");
+  return connected;
 }
 
 void sendHeartbeat() {
   lastHeartbeatAt = millis();
-  if (!ensureWifi()) return;
+  if (!ensureWifi()) {
+    serverOnline = false;
+    if (idleVisible)
+      showIdle();
+    return;
+  }
 
-  String body = "{\"deviceId\":\"" + String(DEVICE_ID) + "\"}";
-  String response = httpPost("/api/locker/heartbeat", body);
+  StaticJsonDocument<128> bodyDoc;
+  bodyDoc["deviceId"] = DEVICE_ID;
+  serverOnline = postJsonOk("/api/locker/heartbeat", bodyDoc);
   Serial.print(F("[API] heartbeat "));
-  Serial.println(response.length() > 0 ? F("ok") : F("fail"));
+  Serial.println(serverOnline ? F("ok") : F("fail"));
+  if (idleVisible)
+    showIdle();
 }
 
 void postDeposit(const String &uid, int locker) {
@@ -556,12 +554,14 @@ void postDeposit(const String &uid, int locker) {
     return;
   }
 
-  String body = "{\"deviceId\":\"" + String(DEVICE_ID) +
-                "\",\"uid\":\"" + uid +
-                "\",\"locker\":" + String(locker + 1) + "}";
-  String response = httpPost("/api/locker/deposit", body);
-  if (jsonBool(response, "ok")) logEvent("deposit_api", uid, locker);
-  else logEvent("deposit_api_fail", uid, locker);
+  StaticJsonDocument<160> bodyDoc;
+  bodyDoc["deviceId"] = DEVICE_ID;
+  bodyDoc["uid"] = uid;
+  bodyDoc["locker"] = locker + 1;
+  if (postJsonOk("/api/locker/deposit", bodyDoc))
+    logEvent("deposit_api", uid, locker);
+  else
+    logEvent("deposit_api_fail", uid, locker);
 }
 
 void postPickup(const String &uid) {
@@ -570,52 +570,49 @@ void postPickup(const String &uid) {
     return;
   }
 
-  String body = "{\"deviceId\":\"" + String(DEVICE_ID) +
-                "\",\"uid\":\"" + uid + "\"}";
-  String response = httpPost("/api/locker/pickup", body);
+  StaticJsonDocument<160> bodyDoc;
+  bodyDoc["deviceId"] = DEVICE_ID;
+  bodyDoc["uid"] = uid;
   Serial.print(F("[API] pickup "));
-  Serial.println(jsonBool(response, "ok") ? F("ok") : F("fail"));
+  Serial.println(postJsonOk("/api/locker/pickup", bodyDoc) ? F("ok")
+                                                           : F("fail"));
 }
 
 AccessCheck checkServerAccess(const String &uid, char mode) {
-  AccessCheck result;
-  result.decision = ACCESS_BYPASS;
-  result.paymentId = "";
-  result.fee = 0;
+  AccessCheck result = {ACCESS_BYPASS, "", 0};
 
   // Mat mang thi cho mo tam, vi tu van con UID local trong NVS de doi chieu.
-  if (!ensureWifi()) return result;
+  if (!ensureWifi())
+    return result;
 
-  showText("KIEM TRA", "May chu...");
-  String path = "/api/locker/access?deviceId=" + urlEncode(DEVICE_ID) +
-                "&uid=" + urlEncode(uid) +
-                "&mode=" + String(mode);
-  String response = httpGet(path);
-
-  if (response.length() == 0) {
+  String path = "/api/locker/access?deviceId=" + String(DEVICE_ID) +
+                "&uid=" + uid + "&mode=" + String(mode);
+  StaticJsonDocument<1536> doc;
+  if (!getJson(path, doc)) {
     Serial.println(F("[API] access timeout, bypass"));
     return result;
   }
 
-  if (jsonBool(response, "allowOpen")) {
+  if (doc["allowOpen"] | false) {
     result.decision = ACCESS_ALLOW;
     return result;
   }
 
-  if (jsonHas(response, "paymentId")) {
+  const char *paymentId = doc["paymentId"] | "";
+  if (paymentId[0] != '\0') {
     result.decision = ACCESS_NEED_PAYMENT;
-    result.paymentId = jsonString(response, "paymentId");
-    result.fee = jsonInt(response, "fee");
+    result.paymentId = paymentId;
+    result.fee = doc["fee"] | 0;
 
-    String qrPayload = jsonString(response, "qrPayload");
-    if (qrPayload.length() > 0) {
+    const char *qrPayload = doc["qrPayload"] | "";
+    if (qrPayload[0] != '\0') {
       Serial.print(F("PAYQR|"));
       Serial.println(qrPayload);
     }
     return result;
   }
 
-  if (jsonHas(response, "found") && !jsonBool(response, "found")) {
+  if (doc["found"].is<bool>() && !(doc["found"] | false)) {
     result.decision = ACCESS_DENY;
     return result;
   }
@@ -623,12 +620,15 @@ AccessCheck checkServerAccess(const String &uid, char mode) {
   return result;
 }
 
-bool canContinueAfterAccess(const AccessCheck &access, int locker, const String &uid) {
-  if (access.decision == ACCESS_ALLOW || access.decision == ACCESS_BYPASS) return true;
+bool canContinueAfterAccess(const AccessCheck &access, int locker,
+                            const String &uid) {
+  if (access.decision == ACCESS_ALLOW || access.decision == ACCESS_BYPASS)
+    return true;
 
   if (access.decision == ACCESS_NEED_PAYMENT) {
     bool paid = waitForPayment(access.paymentId, access.fee);
-    if (paid) return true;
+    if (paid)
+      return true;
 
     report(false, locker + 1, "PAY_TIMEOUT", "CHUA THANH TOAN");
     return false;
@@ -641,7 +641,8 @@ bool canContinueAfterAccess(const AccessCheck &access, int locker, const String 
 }
 
 bool waitForPayment(const String &paymentId, int fee) {
-  if (paymentId.length() == 0) return false;
+  if (paymentId.length() == 0)
+    return false;
 
   unsigned long startedAt = millis();
   while (millis() - startedAt < PAYMENT_POLL_TIMEOUT) {
@@ -652,14 +653,14 @@ bool waitForPayment(const String &paymentId, int fee) {
       return true;
     }
 
-    String path = "/api/payment/status?paymentId=" + urlEncode(paymentId);
-    String response = httpGet(path);
-    if (response.length() == 0) {
+    String path = "/api/payment/status?paymentId=" + paymentId;
+    StaticJsonDocument<512> doc;
+    if (!getJson(path, doc)) {
       Serial.println(F("[PAY] timeout, bypass"));
       return true;
     }
 
-    if (jsonBool(response, "paid") || jsonBool(response, "allowOpen")) {
+    if ((doc["paid"] | false) || (doc["allowOpen"] | false)) {
       showText("DA THANH TOAN", "Dang mo...");
       return true;
     }
@@ -670,116 +671,79 @@ bool waitForPayment(const String &paymentId, int fee) {
   return false;
 }
 
-String httpGet(const String &path) {
-  HTTPClient http;
-  String url = String(API_BASE_URL) + path;
-  http.begin(url);
-  http.setTimeout(HTTP_TIMEOUT);
-
-  int status = http.GET();
-  String response = "";
-  if (status > 0) response = http.getString();
-  http.end();
-
-  Serial.print(F("[GET] "));
-  Serial.print(path);
-  Serial.print(F(" -> "));
-  Serial.println(status);
-  return response;
-}
+String httpGet(const String &path) { return httpRequest("GET", path, ""); }
 
 String httpPost(const String &path, const String &body) {
+  return httpRequest("POST", path, body);
+}
+
+bool postJsonOk(const String &path, JsonDocument &bodyDoc) {
+  String response = httpPost(path, toJson(bodyDoc));
+  StaticJsonDocument<512> doc;
+  return response.length() > 0 && parseJson(response, doc) &&
+         (doc["ok"] | false);
+}
+
+bool getJson(const String &path, JsonDocument &doc) {
+  String response = httpGet(path);
+  return response.length() > 0 && parseJson(response, doc);
+}
+
+String httpRequest(const char *method, const String &path, const String &body) {
   HTTPClient http;
   String url = String(API_BASE_URL) + path;
   http.begin(url);
   http.setTimeout(HTTP_TIMEOUT);
-  http.addHeader("Content-Type", "application/json");
 
-  int status = http.POST(body);
+  int status;
+  if (method[0] == 'P') {
+    http.addHeader("Content-Type", "application/json");
+    status = http.POST(body);
+  } else {
+    status = http.GET();
+  }
+
   String response = "";
-  if (status > 0) response = http.getString();
+  if (status > 0)
+    response = http.getString();
   http.end();
 
-  Serial.print(F("[POST] "));
+  Serial.print('[');
+  Serial.print(method);
+  Serial.print(F("] "));
   Serial.print(path);
   Serial.print(F(" -> "));
   Serial.println(status);
   return response;
 }
 
-String urlEncode(const String &value) {
-  String encoded = "";
-  const char hex[] = "0123456789ABCDEF";
+bool parseJson(const String &response, JsonDocument &doc) {
+  DeserializationError error = deserializeJson(doc, response);
+  if (!error)
+    return true;
 
-  for (unsigned int i = 0; i < value.length(); i++) {
-    char c = value.charAt(i);
-    bool safe = (c >= 'A' && c <= 'Z') ||
-                (c >= 'a' && c <= 'z') ||
-                (c >= '0' && c <= '9') ||
-                c == '-' || c == '_' || c == '.';
-    if (safe) {
-      encoded += c;
-    } else {
-      encoded += '%';
-      encoded += hex[(c >> 4) & 0x0F];
-      encoded += hex[c & 0x0F];
-    }
-  }
-
-  return encoded;
+  Serial.print(F("[JSON] "));
+  Serial.println(error.c_str());
+  return false;
 }
 
-bool jsonHas(const String &json, const char *key) {
-  return json.indexOf("\"" + String(key) + "\"") >= 0;
+String toJson(JsonDocument &doc) {
+  String body;
+  serializeJson(doc, body);
+  return body;
 }
 
-bool jsonBool(const String &json, const char *key) {
-  String marker = "\"" + String(key) + "\":true";
-  return json.indexOf(marker) >= 0;
-}
+void buzzerOn() { digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_HIGH ? HIGH : LOW); }
 
-int jsonInt(const String &json, const char *key) {
-  String marker = "\"" + String(key) + "\":";
-  int start = json.indexOf(marker);
-  if (start < 0) return 0;
-  start += marker.length();
-
-  String number = "";
-  while (start < (int)json.length()) {
-    char c = json.charAt(start);
-    if (c < '0' || c > '9') break;
-    number += c;
-    start++;
-  }
-
-  return number.toInt();
-}
-
-String jsonString(const String &json, const char *key) {
-  String marker = "\"" + String(key) + "\":\"";
-  int start = json.indexOf(marker);
-  if (start < 0) return "";
-  start += marker.length();
-
-  int end = json.indexOf('"', start);
-  if (end < 0) return "";
-  return json.substring(start, end);
-}
-
-void buzzerOn() {
-  digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_HIGH ? HIGH : LOW);
-}
-
-void buzzerOff() {
-  digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_HIGH ? LOW : HIGH);
-}
+void buzzerOff() { digitalWrite(BUZZER_PIN, BUZZER_ACTIVE_HIGH ? LOW : HIGH); }
 
 void beepScanOk() {
   for (int i = 0; i < 2; i++) {
     buzzerOn();
     delay(80);
     buzzerOff();
-    if (i == 0) delay(80);
+    if (i == 0)
+      delay(80);
   }
 }
 
@@ -789,8 +753,10 @@ void printLockerState() {
     Serial.print(F("Hoc "));
     Serial.print(i + 1);
     Serial.print(F(": "));
-    if (lockerUid[i].length() == 0) Serial.println(F("TRONG"));
-    else Serial.println(lockerUid[i]);
+    if (lockerUid[i].length() == 0)
+      Serial.println(F("TRONG"));
+    else
+      Serial.println(lockerUid[i]);
   }
   Serial.println(F("========================"));
 }

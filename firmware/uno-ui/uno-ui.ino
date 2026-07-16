@@ -2,6 +2,7 @@
 #include <Keypad.h>
 #include <LiquidCrystal_I2C.h>
 #include <SoftwareSerial.h>
+#include <ctype.h>
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
@@ -78,9 +79,8 @@ String readUid() {
     char c = (char)rfidSerial.read();
     lastRfidByteAt = millis();
 
-    if (isHexChar(c)) {
-      uidBuffer += c;
-      uidBuffer.toUpperCase();
+    if (isxdigit((unsigned char)c)) {
+      uidBuffer += (char)toupper((unsigned char)c);
 
       if (uidBuffer.length() >= UID_MAX_LENGTH) {
         return takeUid();
@@ -110,12 +110,6 @@ String takeUid() {
   }
 
   return uid;
-}
-
-bool isHexChar(char c) {
-  return (c >= '0' && c <= '9') ||
-         (c >= 'A' && c <= 'F') ||
-         (c >= 'a' && c <= 'f');
 }
 
 void sendRequest(char selectedMode, const String &uid) {
