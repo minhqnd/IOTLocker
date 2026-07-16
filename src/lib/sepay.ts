@@ -1,12 +1,19 @@
+import { randomUUID } from 'crypto';
+
+export const PAYMENT_PREFIX = 'IOT';
+
+export function makePaymentId() {
+  const randomPart = randomUUID().replaceAll('-', '').slice(0, 8).toUpperCase();
+  return `${PAYMENT_PREFIX}${randomPart}`;
+}
+
 /**
- * Extracts a 6-digit numeric order code from the bank transfer transaction content.
- * Example: "CK MA DON 102938 CUA KHACH HANG" -> "102938"
+ * Sepay sends the bank transfer content back to us, so only accept our own
+ * prefixed code. Plain 6 digits are too easy to match by accident.
  */
 export function extractOrderCode(content: string): string | null {
   if (!content) return null;
 
-  // Match exactly 6 digits with word boundaries to prevent matching part of longer numbers
-  const match = content.match(/\b\d{6}\b/);
+  const match = content.toUpperCase().match(/\bIOT[A-Z0-9]{8}\b/);
   return match ? match[0] : null;
 }
-

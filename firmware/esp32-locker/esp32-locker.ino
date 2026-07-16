@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <ctype.h>
+#include <qrcode.h>
 
 enum DoorResult { DOOR_OK, DOOR_NOT_OPENED, DOOR_LEFT_OPEN };
 
@@ -20,6 +21,7 @@ enum AccessDecision {
 struct AccessCheck {
   AccessDecision decision;
   String paymentId;
+  String qrPayload;
   int fee;
 };
 
@@ -52,8 +54,8 @@ const int UNO_RX_PIN = 16;
 const int UNO_TX_PIN = 17;
 HardwareSerial UnoSerial(2);
 
-const char WIFI_SSID[] = "YOUR_WIFI";
-const char WIFI_PASSWORD[] = "YOUR_PASSWORD";
+const char WIFI_SSID[] = "307";
+const char WIFI_PASSWORD[] = "66668888";
 const char API_BASE_URL[] = "https://iot-locker.vercel.app";
 const char DEVICE_ID[] = "locker-01";
 
@@ -62,6 +64,11 @@ const unsigned long HTTP_TIMEOUT = 5000;
 const unsigned long HEARTBEAT_EVERY = 60000;
 const unsigned long PAYMENT_POLL_EVERY = 2000;
 const unsigned long PAYMENT_POLL_TIMEOUT = 40000;
+const int QR_MAX_VERSION = 6;
+byte qrDrawX = 0;
+byte qrDrawY = 0;
+
+void drawQrModules(esp_qrcode_handle_t qrcode);
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -487,22 +494,59 @@ void showResult(bool ok, const String &title, int lockerNumber) {
   display.display();
 }
 
-void showPayment(const String &paymentId, int fee) {
+void showPayment(const String &paymentId, const String &qrPayload, int fee) {
   if (!oledReady)
     return;
   idleVisible = false;
 
   display.clearDisplay();
-  drawLine(1, 0, "CAN THANH TOAN");
-  drawLine(1, 18, "Phi: " + String(fee) + " VND");
-  drawLine(1, 34, "Ma: " + paymentId);
-  drawLine(1, 50, "Cho xac nhan...");
+  if (qrPayload.length() > 0) {
+    drawQr(qrPayload, 0, 0);
+    drawLineAt(56, 1, 0, "Quet QR");
+    drawLineAt(56, 1, 14, String(fee) + " VND");
+    drawLineAt(56, 1, 28, paymentId);
+    drawLineAt(56, 1, 50, "Dang cho...");
+  } else {
+    drawLine(1, 0, "CAN THANH TOAN");
+    drawLine(1, 18, "Phi: " + String(fee) + " VND");
+    drawLine(1, 34, "Ma: " + paymentId);
+    drawLine(1, 50, "Cho xac nhan...");
+  }
   display.display();
 }
 
+void drawQr(const String &payload, byte x, byte y) {
+  qrDrawX = x;
+  qrDrawY = y;
+
+  esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
+  cfg.display_func = drawQrModules;
+  cfg.max_qrcode_version = QR_MAX_VERSION;
+  cfg.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
+  esp_qrcode_generate(&cfg, payload.c_str());
+}
+
+void drawQrModules(esp_qrcode_handle_t qrcode) {
+  int size = esp_qrcode_get_size(qrcode);
+  byte border = 2;
+  display.fillRect(qrDrawX, qrDrawY, size + border * 2, size + border * 2, SSD1306_WHITE);
+
+  for (int qrY = 0; qrY < size; qrY++) {
+    for (int qrX = 0; qrX < size; qrX++) {
+      if (esp_qrcode_get_module(qrcode, qrX, qrY)) {
+        display.drawPixel(qrDrawX + qrX + border, qrDrawY + qrY + border, SSD1306_BLACK);
+      }
+    }
+  }
+}
+
 void drawLine(byte size, byte y, const String &text) {
+  drawLineAt(0, size, y, text);
+}
+
+void drawLineAt(byte x, byte size, byte y, const String &text) {
   display.setTextSize(size);
-  display.setCursor(0, y);
+  display.setCursor(x, y);
   display.println(text);
 }
 
@@ -579,7 +623,7 @@ void postPickup(const String &uid) {
 }
 
 AccessCheck checkServerAccess(const String &uid, char mode) {
-  AccessCheck result = {ACCESS_BYPASS, "", 0};
+  AccessCheck result = {ACCESS_BYPASS, "", "", 0};
 
   // Mat mang thi cho mo tam, vi tu van con UID local trong NVS de doi chieu.
   if (!ensureWifi())
@@ -606,6 +650,7 @@ AccessCheck checkServerAccess(const String &uid, char mode) {
 
     const char *qrPayload = doc["qrPayload"] | "";
     if (qrPayload[0] != '\0') {
+      result.qrPayload = qrPayload;
       Serial.print(F("PAYQR|"));
       Serial.println(qrPayload);
     }
@@ -626,7 +671,7 @@ bool canContinueAfterAccess(const AccessCheck &access, int locker,
     return true;
 
   if (access.decision == ACCESS_NEED_PAYMENT) {
-    bool paid = waitForPayment(access.paymentId, access.fee);
+    bool paid = waitForPayment(access.paymentId, access.qrPayload, access.fee);
     if (paid)
       return true;
 
@@ -640,13 +685,13 @@ bool canContinueAfterAccess(const AccessCheck &access, int locker,
   return false;
 }
 
-bool waitForPayment(const String &paymentId, int fee) {
+bool waitForPayment(const String &paymentId, const String &qrPayload, int fee) {
   if (paymentId.length() == 0)
     return false;
 
   unsigned long startedAt = millis();
   while (millis() - startedAt < PAYMENT_POLL_TIMEOUT) {
-    showPayment(paymentId, fee);
+    showPayment(paymentId, qrPayload, fee);
 
     if (!ensureWifi()) {
       Serial.println(F("[PAY] mat mang luc cho, bypass"));

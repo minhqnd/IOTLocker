@@ -33,11 +33,15 @@ interface GenerateQRParams {
  * or rendered on the customer payment page.
  */
 export function generateVietQRString({ amount, orderCode }: GenerateQRParams): string {
-  const bankBin = process.env.BANK_BIN || '970436'; // Fallback to VCB BIN if not set
-  const bankAccount = process.env.BANK_ACCOUNT || '1017588888'; // Fallback account
+  const bankBin = process.env.BANK_BIN?.trim();
+  const bankAccount = process.env.BANK_ACCOUNT?.trim();
 
-  const cleanBankBin = bankBin.trim();
-  const cleanBankAccount = bankAccount.trim();
+  if (!bankBin || !bankAccount) {
+    throw new Error('Missing BANK_BIN or BANK_ACCOUNT for VietQR');
+  }
+
+  const cleanBankBin = bankBin;
+  const cleanBankAccount = bankAccount;
   const cleanOrderCode = orderCode.trim();
 
   // Construct VietQR (EMVCo) format
@@ -72,4 +76,3 @@ export function generateVietQRString({ amount, orderCode }: GenerateQRParams): s
   
   return v;
 }
-

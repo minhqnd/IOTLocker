@@ -7,12 +7,17 @@ export async function POST(request: Request) {
   try {
     const payload = await request.json();
     const content = String(payload.content || payload.description || '');
-    const transferAmount = Number(payload.transferAmount || payload.amount || 0);
-    const sepayId = String(payload.id || payload.transactionId || '');
-    const paymentId = extractOrderCode(content);
+    const transferAmount = Number(payload.transferAmount || 0);
+    const transferType = String(payload.transferType || '').toLowerCase();
+    const sepayId = String(payload.id || '');
+    const paymentId = extractOrderCode(payload.code || content);
+
+    if (transferType && transferType !== 'in') {
+      return Response.json({ success: true });
+    }
 
     if (!paymentId) {
-      return Response.json({ success: true, message: 'Ignored: no payment id in content' });
+      return Response.json({ success: true });
     }
 
     const { data: session, error } = await supabase
@@ -27,15 +32,15 @@ export async function POST(request: Request) {
     }
 
     if (!session) {
-      return Response.json({ success: true, message: 'Ignored: payment session not found' });
+      return Response.json({ success: true });
     }
 
     if (session.payment_status === 'paid') {
-      return Response.json({ success: true, message: 'Already paid' });
+      return Response.json({ success: true });
     }
 
     if (transferAmount < Number(session.fee_amount || 0)) {
-      return Response.json({ success: true, message: 'Ignored: amount too small' });
+      return Response.json({ success: true });
     }
 
     const now = new Date().toISOString();
@@ -58,7 +63,7 @@ export async function POST(request: Request) {
       uid: session.uid,
       locker_number: session.locker_number,
       session_id: session.id,
-      payload: { sepayId, transferAmount, content, paymentId },
+      payload: { sepayId, transferAmount, transferType, content, paymentId },
     });
 
     return Response.json({ success: true });

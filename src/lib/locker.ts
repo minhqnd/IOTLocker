@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { makePaymentId } from './sepay';
 import { generateVietQRString } from './vietqr';
 
 export const FREE_MINUTES = Number(process.env.FREE_MINUTES || 30);
@@ -31,10 +32,6 @@ export function cleanUid(value: unknown) {
 export function isOverdue(depositedAt: string) {
   const startedAt = new Date(depositedAt).getTime();
   return Date.now() - startedAt > FREE_MINUTES * 60 * 1000;
-}
-
-export function makePaymentId() {
-  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 export async function logEvent(
