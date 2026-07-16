@@ -63,7 +63,7 @@ const unsigned long WIFI_TIMEOUT = 7000;
 const unsigned long HTTP_TIMEOUT = 5000;
 const unsigned long HEARTBEAT_EVERY = 60000;
 const unsigned long PAYMENT_POLL_EVERY = 2000;
-const unsigned long PAYMENT_POLL_TIMEOUT = 40000;
+const unsigned long PAYMENT_POLL_TIMEOUT = 120000;
 const int QR_MAX_VERSION = 6;
 byte qrDrawX = 0;
 byte qrDrawY = 0;
@@ -685,6 +685,22 @@ bool canContinueAfterAccess(const AccessCheck &access, int locker,
   return false;
 }
 
+bool isPaymentReady(const String &paymentId) {
+  String path = "/api/payment/status?paymentId=" + paymentId;
+  StaticJsonDocument<512> doc;
+  if (!getJson(path, doc)) {
+    Serial.println(F("[PAY] timeout, bypass"));
+    return true;
+  }
+
+  bool paid = (doc["paid"] | false) || (doc["allowOpen"] | false);
+  Serial.print(F("[PAY] status="));
+  Serial.print((const char *)(doc["paymentStatus"] | "unknown"));
+  Serial.print(F(" paid="));
+  Serial.println(paid ? F("yes") : F("no"));
+  return paid;
+}
+
 bool waitForPayment(const String &paymentId, const String &qrPayload, int fee) {
   if (paymentId.length() == 0)
     return false;
@@ -698,14 +714,7 @@ bool waitForPayment(const String &paymentId, const String &qrPayload, int fee) {
       return true;
     }
 
-    String path = "/api/payment/status?paymentId=" + paymentId;
-    StaticJsonDocument<512> doc;
-    if (!getJson(path, doc)) {
-      Serial.println(F("[PAY] timeout, bypass"));
-      return true;
-    }
-
-    if ((doc["paid"] | false) || (doc["allowOpen"] | false)) {
+    if (isPaymentReady(paymentId)) {
       showText("DA THANH TOAN", "Dang mo...");
       return true;
     }
@@ -713,6 +722,13 @@ bool waitForPayment(const String &paymentId, const String &qrPayload, int fee) {
     delay(PAYMENT_POLL_EVERY);
   }
 
+  // Co luc webhook ve sat nut timeout, check them lan cuoi truoc khi bao fail.
+  if (isPaymentReady(paymentId)) {
+    showText("DA THANH TOAN", "Dang mo...");
+    return true;
+  }
+
+  Serial.println(F("[PAY] het gio cho thanh toan"));
   return false;
 }
 

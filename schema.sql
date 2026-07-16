@@ -45,3 +45,27 @@ create table if not exists parking_cards (
   note text,
   created_at timestamptz not null default now()
 );
+
+grant usage on schema public to anon;
+grant select on table locker_sessions, lockers, events to anon;
+
+do $$
+begin
+  alter publication supabase_realtime add table locker_sessions;
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table lockers;
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table events;
+exception
+  when duplicate_object then null;
+end $$;

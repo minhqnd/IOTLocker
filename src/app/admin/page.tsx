@@ -1,6 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createBrowserSupabase } from '@/lib/supabase-browser';
+
+const DEVICE_ID = 'locker-01';
+const LOCKER_COUNT = 4;
 
 type LockerSession = {
   id: string;
@@ -24,10 +28,8 @@ type Locker = {
 type EventLog = {
   id: string;
   type: string;
-  device_id: string | null;
   uid: string | null;
   locker_number: number | null;
-  payload: Record<string, unknown> | null;
   created_at: string;
 };
 
@@ -37,10 +39,17 @@ type AdminData = {
   events: EventLog[];
 };
 
+type LockerSlot = {
+  number: number;
+  session?: LockerSession;
+};
+
 export default function AdminPage() {
   const [data, setData] = useState<AdminData>({ sessions: [], lockers: [], events: [] });
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [now, setNow] = useState(Date.now());
 
   async function loadData() {
     try {
@@ -56,29 +65,63 @@ export default function AdminPage() {
     }
   }
 
+  async function runAction(locker: number, action: string) {
+    const key = `${locker}:${action}`;
+    setBusy(key);
+    try {
+      const response = await fetch('/api/admin-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: DEVICE_ID, locker, action }),
+      });
+      const json = await response.json();
+      if (!response.ok || !json.ok) throw new Error(json.error || 'Action failed');
+      await loadData();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Action failed');
+    } finally {
+      setBusy('');
+    }
+  }
+
   useEffect(() => {
-    const startTimer = setTimeout(() => {
-      void loadData();
-    }, 0);
-    const timer = setInterval(() => {
-      void loadData();
-    }, 5000);
+    void loadData();
+    const clockTimer = setInterval(() => setNow(Date.now()), 1000);
+    const supabase = createBrowserSupabase();
+
+    if (!supabase) {
+      setError('Realtime chưa có public Supabase env, dashboard chỉ tải snapshot ban đầu.');
+      return () => clearInterval(clockTimer);
+    }
+
+    const channel = supabase
+      .channel('admin-dashboard')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'locker_sessions' }, () => void loadData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'lockers' }, () => void loadData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => void loadData())
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR') setError('Realtime chưa kết nối được, bấm Làm mới nếu cần.');
+      });
+
     return () => {
-      clearTimeout(startTimer);
-      clearInterval(timer);
+      clearInterval(clockTimer);
+      void supabase.removeChannel(channel);
     };
   }, []);
 
   const activeSessions = useMemo(() => data.sessions.filter((session) => session.is_active), [data.sessions]);
+  const slots = useMemo(() => buildSlots(activeSessions), [activeSessions]);
   const paidCount = activeSessions.filter((session) => session.payment_status === 'paid').length;
+  const overdueCount = activeSessions.filter((session) => isOverdue(session.deposited_at, now)).length;
+  const currentLocker = data.lockers.find((locker) => locker.device_id === DEVICE_ID) || data.lockers[0];
 
   return (
     <main className="min-h-screen bg-zinc-50 text-zinc-950">
       <div className="mx-auto max-w-7xl px-5 py-6">
         <header className="mb-6 flex flex-col gap-3 border-b border-zinc-200 pb-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">IOT102 Locker v2</p>
-            <h1 className="mt-1 text-2xl font-semibold">Dashboard tủ RFID</h1>
+            <p className="text-xs font-semibold uppercase text-zinc-500">IOT102 Locker v2</p>
+            <h1 className="mt-1 text-2xl font-semibold">Mô phỏng tủ RFID 4 hộc</h1>
           </div>
           <button
             onClick={loadData}
@@ -88,19 +131,28 @@ export default function AdminPage() {
           </button>
         </header>
 
-        {error && (
-          <div className="mb-5 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {error}
-          </div>
-        )}
+        {error && <div className="mb-5 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
 
-        <section className="grid gap-3 sm:grid-cols-3">
-          <Metric label="Phiên đang dùng" value={String(activeSessions.length)} />
+        <section className="grid gap-3 sm:grid-cols-4">
+          <Metric label="Hộc đang dùng" value={`${activeSessions.length}/${LOCKER_COUNT}`} />
+          <Metric label="Quá hạn" value={String(overdueCount)} />
           <Metric label="Đã thanh toán" value={String(paidCount)} />
-          <Metric label="Thiết bị" value={String(data.lockers.length)} />
+          <Metric label="Thiết bị" value={currentLocker?.online ? 'Online' : 'Offline'} muted={!currentLocker?.online} />
         </section>
 
-        <section className="mt-6 grid gap-6 lg:grid-cols-[1.5fr_1fr]">
+        <section className="mt-6 grid gap-4 lg:grid-cols-4">
+          {slots.map((slot) => (
+            <LockerCard
+              key={slot.number}
+              slot={slot}
+              now={now}
+              busy={busy}
+              onAction={runAction}
+            />
+          ))}
+        </section>
+
+        <section className="mt-6 grid gap-6 lg:grid-cols-[1.3fr_0.7fr]">
           <Panel title="Phiên gửi đồ">
             {loading ? (
               <Empty>Đang tải...</Empty>
@@ -108,15 +160,15 @@ export default function AdminPage() {
               <Empty>Chưa có phiên gửi đồ.</Empty>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[720px] text-left text-sm">
+                <table className="w-full min-w-[760px] text-left text-sm">
                   <thead className="border-b border-zinc-200 text-xs uppercase text-zinc-500">
                     <tr>
                       <th className="py-2 pr-3">UID</th>
                       <th className="py-2 pr-3">Hộc</th>
-                      <th className="py-2 pr-3">Thiết bị</th>
                       <th className="py-2 pr-3">Trạng thái</th>
                       <th className="py-2 pr-3">Thanh toán</th>
-                      <th className="py-2 pr-3">Thời gian gửi</th>
+                      <th className="py-2 pr-3">Đang gửi</th>
+                      <th className="py-2 pr-3">Bắt đầu</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -124,13 +176,9 @@ export default function AdminPage() {
                       <tr key={session.id} className="border-b border-zinc-100">
                         <td className="py-2 pr-3 font-mono">{session.uid}</td>
                         <td className="py-2 pr-3">Hộc {session.locker_number}</td>
-                        <td className="py-2 pr-3">{session.device_id}</td>
-                        <td className="py-2 pr-3">
-                          <Status active={session.is_active} />
-                        </td>
-                        <td className="py-2 pr-3">
-                          <Payment status={session.payment_status} paymentId={session.payment_id} fee={session.fee_amount} />
-                        </td>
+                        <td className="py-2 pr-3"><Status active={session.is_active} /></td>
+                        <td className="py-2 pr-3"><Payment session={session} /></td>
+                        <td className="py-2 pr-3 font-mono text-zinc-700">{session.is_active ? elapsed(session.deposited_at, now) : '-'}</td>
                         <td className="py-2 pr-3 text-zinc-600">{formatTime(session.deposited_at)}</td>
                       </tr>
                     ))}
@@ -140,60 +188,94 @@ export default function AdminPage() {
             )}
           </Panel>
 
-          <div className="space-y-6">
-            <Panel title="Tủ locker">
-              {data.lockers.length === 0 ? (
-                <Empty>Chưa có heartbeat.</Empty>
-              ) : (
-                <div className="space-y-3">
-                  {data.lockers.map((locker) => {
-                    return (
-                      <div key={locker.device_id} className="rounded-md border border-zinc-200 bg-white p-3">
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium">{locker.device_id}</span>
-                          <span className={locker.online ? 'text-sm text-emerald-700' : 'text-sm text-zinc-500'}>
-                            {locker.online ? 'Online' : 'Offline'}
-                          </span>
-                        </div>
-                        <p className="mt-1 text-xs text-zinc-500">{formatTime(locker.last_seen)}</p>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </Panel>
-
-            <Panel title="Event mới nhất">
-              {data.events.length === 0 ? (
-                <Empty>Chưa có event.</Empty>
-              ) : (
-                <div className="space-y-2">
-                  {data.events.slice(0, 12).map((event) => (
-                    <div key={event.id} className="rounded-md border border-zinc-200 bg-white p-3 text-sm">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-medium">{event.type}</span>
-                        <span className="text-xs text-zinc-500">{formatTime(event.created_at)}</span>
-                      </div>
-                      <p className="mt-1 font-mono text-xs text-zinc-600">
-                        {event.uid || '-'} {event.locker_number ? `| Hộc ${event.locker_number}` : ''}
-                      </p>
+          <Panel title="Event mới nhất">
+            {data.events.length === 0 ? (
+              <Empty>Chưa có event.</Empty>
+            ) : (
+              <div className="space-y-2">
+                {data.events.slice(0, 12).map((event) => (
+                  <div key={event.id} className="rounded-md border border-zinc-200 bg-white p-3 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-medium">{event.type}</span>
+                      <span className="text-xs text-zinc-500">{formatTime(event.created_at)}</span>
                     </div>
-                  ))}
-                </div>
-              )}
-            </Panel>
-          </div>
+                    <p className="mt-1 font-mono text-xs text-zinc-600">
+                      {event.uid || '-'} {event.locker_number ? `| Hộc ${event.locker_number}` : ''}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Panel>
         </section>
       </div>
     </main>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function LockerCard({ slot, now, busy, onAction }: { slot: LockerSlot; now: number; busy: string; onAction: (locker: number, action: string) => void }) {
+  const session = slot.session;
+  const occupied = Boolean(session);
+  const overdue = session ? isOverdue(session.deposited_at, now) : false;
+
+  return (
+    <article className="rounded-md border border-zinc-200 bg-white p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase text-zinc-500">Hộc {String(slot.number).padStart(2, '0')}</p>
+          <h2 className="mt-1 text-lg font-semibold">{occupied ? 'Đang gửi' : 'Trống'}</h2>
+        </div>
+        <span className={occupied ? 'rounded bg-amber-50 px-2 py-1 text-xs text-amber-700' : 'rounded bg-emerald-50 px-2 py-1 text-xs text-emerald-700'}>
+          {occupied ? (overdue ? 'Quá hạn' : 'Trong hạn') : 'Sẵn sàng'}
+        </span>
+      </div>
+
+      {session ? (
+        <div className="mt-4 space-y-3 text-sm">
+          <p className="font-mono text-zinc-700">{session.uid}</p>
+          <div>
+            <p className="text-xs text-zinc-500">Đang gửi</p>
+            <p className="font-mono text-2xl font-semibold">{elapsed(session.deposited_at, now)}</p>
+          </div>
+          <Payment session={session} />
+        </div>
+      ) : (
+        <Empty>Chưa có đồ trong hộc này.</Empty>
+      )}
+
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        {!session ? (
+          <ActionButton busy={busy === `${slot.number}:deposit`} onClick={() => onAction(slot.number, 'deposit')}>Tạo gửi thử</ActionButton>
+        ) : (
+          <>
+            <ActionButton busy={busy === `${slot.number}:overdue`} onClick={() => onAction(slot.number, 'overdue')}>Quá hạn</ActionButton>
+            <ActionButton busy={busy === `${slot.number}:pending`} onClick={() => onAction(slot.number, 'pending')}>Chờ TT</ActionButton>
+            <ActionButton busy={busy === `${slot.number}:paid`} onClick={() => onAction(slot.number, 'paid')}>Đã TT</ActionButton>
+            <ActionButton busy={busy === `${slot.number}:pickup`} onClick={() => onAction(slot.number, 'pickup')}>Lấy đồ</ActionButton>
+          </>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function ActionButton({ children, busy, onClick }: { children: ReactNode; busy: boolean; onClick: () => void }) {
+  return (
+    <button
+      disabled={busy}
+      onClick={onClick}
+      className="h-9 rounded-md border border-zinc-300 bg-white px-2 text-sm font-medium hover:bg-zinc-100 disabled:cursor-wait disabled:opacity-60"
+    >
+      {busy ? 'Đang...' : children}
+    </button>
+  );
+}
+
+function Metric({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) {
   return (
     <div className="rounded-md border border-zinc-200 bg-white p-4">
       <p className="text-sm text-zinc-500">{label}</p>
-      <p className="mt-2 text-3xl font-semibold">{value}</p>
+      <p className={`mt-2 text-3xl font-semibold ${muted ? 'text-zinc-500' : ''}`}>{value}</p>
     </div>
   );
 }
@@ -219,13 +301,48 @@ function Status({ active }: { active: boolean }) {
   );
 }
 
-function Payment({ status, paymentId, fee }: { status: string; paymentId: string | null; fee: number }) {
+function Payment({ session }: { session: LockerSession }) {
+  const color = session.payment_status === 'paid' ? 'bg-emerald-50 text-emerald-700' : session.payment_status === 'pending' ? 'bg-amber-50 text-amber-700' : 'bg-zinc-100 text-zinc-700';
   return (
     <div>
-      <span className="rounded bg-zinc-100 px-2 py-1 text-xs text-zinc-700">{status}</span>
-      {paymentId && <p className="mt-1 font-mono text-xs text-zinc-500">{paymentId} · {fee.toLocaleString('vi-VN')}đ</p>}
+      <span className={`rounded px-2 py-1 text-xs ${color}`}>{paymentLabel(session.payment_status)}</span>
+      {session.payment_id && <p className="mt-1 font-mono text-xs text-zinc-500">{session.payment_id} · {session.fee_amount.toLocaleString('vi-VN')}đ</p>}
     </div>
   );
+}
+
+function buildSlots(sessions: LockerSession[]) {
+  return Array.from({ length: LOCKER_COUNT }, (_, index) => {
+    const number = index + 1;
+    return {
+      number,
+      session: sessions.find((session) => session.locker_number === number),
+    };
+  });
+}
+
+function paymentLabel(status: string) {
+  if (status === 'paid') return 'Đã thanh toán';
+  if (status === 'pending') return 'Chờ thanh toán';
+  if (status === 'waived') return 'Bỏ qua phí';
+  return 'Chưa cần TT';
+}
+
+function isOverdue(value: string, now: number) {
+  return now - new Date(value).getTime() > 30 * 60 * 1000;
+}
+
+function elapsed(value: string, now: number) {
+  const totalSeconds = Math.max(0, Math.floor((now - new Date(value).getTime()) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  return `${pad(minutes)}:${pad(seconds)}`;
+}
+
+function pad(value: number) {
+  return String(value).padStart(2, '0');
 }
 
 function formatTime(value: string) {
