@@ -51,6 +51,48 @@ grant select on table locker_sessions, lockers, events to anon;
 
 do $$
 begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'locker_sessions'
+      and policyname = 'locker_sessions_dashboard_read'
+  ) then
+    create policy locker_sessions_dashboard_read
+      on locker_sessions for select to anon, authenticated
+      using (true);
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'lockers'
+      and policyname = 'lockers_dashboard_read'
+  ) then
+    create policy lockers_dashboard_read
+      on lockers for select to anon, authenticated
+      using (true);
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'events'
+      and policyname = 'events_dashboard_read'
+  ) then
+    create policy events_dashboard_read
+      on events for select to anon, authenticated
+      using (true);
+  end if;
+end $$;
+
+do $$
+begin
   alter publication supabase_realtime add table locker_sessions;
 exception
   when duplicate_object then null;

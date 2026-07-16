@@ -116,7 +116,7 @@ export default function AdminPage() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'lockers' }, refreshFromRealtime)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, refreshFromRealtime)
       .subscribe((status) => {
-        if (status === 'SUBSCRIBED') setRealtimeStatus('Connected');
+        if (status === 'SUBSCRIBED') setRealtimeStatus('Realtime');
         if (status === 'CHANNEL_ERROR') setError('Realtime chưa kết nối được, bấm Làm mới nếu cần.');
         if (status === 'CHANNEL_ERROR') setRealtimeStatus('Realtime lỗi');
         if (status === 'TIMED_OUT') setRealtimeStatus('Realtime timeout');
@@ -370,7 +370,7 @@ function Payment({ session, now }: { session: LockerSession; now: number }) {
 }
 
 function RealtimeBadge({ status, lastRealtimeAt }: { status: string; lastRealtimeAt: number | null }) {
-  const ok = status === 'Connected';
+  const ok = status === 'Realtime';
   const bad = status.includes('lỗi') || status.includes('timeout') || status.includes('Thiếu');
   const color = ok ? 'bg-emerald-50 text-emerald-700 ring-emerald-200' : bad ? 'bg-red-50 text-red-700 ring-red-200' : 'bg-zinc-100 text-zinc-600 ring-zinc-200';
 
