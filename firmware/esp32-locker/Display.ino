@@ -9,12 +9,14 @@ void showIdle() {
   }
 
   display.clearDisplay();
-  drawLine(1, 0, "TU GUI DO");
-  drawLine(1, 18,
-           "Trong: " + String(LOCKER_COUNT - used) + "/" +
+  // Font mac dinh khong co bold, ve lech 1px de tieu de trong dam hon.
+  drawLineAt(10, 2, 0, "TU GUI DO");
+  drawLineAt(11, 2, 0, "TU GUI DO");
+  drawLine(1, 25,
+           "Kha dung: " + String(LOCKER_COUNT - used) + "/" +
                String(LOCKER_COUNT));
   // drawLine(1, 32, "Dang dung: " + String(used));
-  drawLine(1, 50, serverOnline ? "Online" : "Offline");
+  drawLine(1, 50, serverOnline ? "San sang" : "Mat ket noi");
   display.display();
   idleVisible = true;
 }
@@ -55,7 +57,7 @@ void showResult(bool ok, const String &title, int lockerNumber) {
   display.display();
 }
 
-void showPayment(const String &paymentId, const String &qrPayload, int fee) {
+void showPayment(const String &qrPayload, int fee, int secondsLeft) {
   if (!oledReady)
     return;
   idleVisible = false;
@@ -63,20 +65,22 @@ void showPayment(const String &paymentId, const String &qrPayload, int fee) {
   display.clearDisplay();
   if (qrPayload.length() > 0) {
     drawQr(qrPayload, 0, 0);
-    drawLineAt(56, 1, 0, "Quet QR");
-    drawLineAt(56, 1, 14, String(fee) + " VND");
-    drawLineAt(56, 1, 28, paymentId);
-    drawLineAt(56, 1, 50, "Dang cho...");
+    byte textX = qrRenderedSize + 4;
+    drawLineAt(textX, 1, 2, "QUET QR");
+    drawLineAt(textX, 2, 18, String(secondsLeft) + "s");
+    drawLineAt(textX, 1, 42, String(fee) + " VND");
+    drawLineAt(textX, 1, 56, "*: Huy");
   } else {
     drawLine(1, 0, "CAN THANH TOAN");
     drawLine(1, 18, "Phi: " + String(fee) + " VND");
-    drawLine(1, 34, "Ma: " + paymentId);
-    drawLine(1, 50, "Cho xac nhan...");
+    drawLine(2, 32, String(secondsLeft) + "s");
+    drawLine(1, 54, "*: Huy");
   }
   display.display();
 }
 
 void showPaymentMenu(int fee) {
+  sendUnoUi("PAY_MENU");
   if (!oledReady) return;
   idleVisible = false;
   display.clearDisplay();
@@ -100,15 +104,16 @@ void drawQr(const String &payload, byte x, byte y) {
 
 void drawQrModules(esp_qrcode_handle_t qrcode) {
   int size = esp_qrcode_get_size(qrcode);
-  byte border = 2;
-  display.fillRect(qrDrawX, qrDrawY, size + border * 2, size + border * 2,
+  const byte quietZone = 4;
+  qrRenderedSize = size + quietZone * 2;
+  display.fillRect(qrDrawX, qrDrawY, qrRenderedSize, qrRenderedSize,
                    SSD1306_WHITE);
 
   for (int qrY = 0; qrY < size; qrY++) {
     for (int qrX = 0; qrX < size; qrX++) {
       if (esp_qrcode_get_module(qrcode, qrX, qrY)) {
-        display.drawPixel(qrDrawX + qrX + border, qrDrawY + qrY + border,
-                          SSD1306_BLACK);
+        display.drawPixel(qrDrawX + qrX + quietZone,
+                          qrDrawY + qrY + quietZone, SSD1306_BLACK);
       }
     }
   }
@@ -127,4 +132,11 @@ void drawLineAt(byte x, byte size, byte y, const String &text) {
 void returnToIdle() {
   delay(RESULT_HOLD);
   showIdle();
+  sendUnoUi("IDLE");
+  idleReturnedEarly = true;
+}
+
+void sendUnoUi(const char *state) {
+  UnoSerial.print(F("UI|"));
+  UnoSerial.println(state);
 }

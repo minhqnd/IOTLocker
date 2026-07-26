@@ -9,7 +9,7 @@
 #include <ctype.h>
 #include <qrcode.h>
 
-enum DoorResult { DOOR_OK, DOOR_NOT_OPENED, DOOR_LEFT_OPEN };
+enum DoorResult { DOOR_OK, DOOR_NOT_OPENED };
 
 enum AccessDecision {
   ACCESS_ALLOW,
@@ -20,12 +20,19 @@ enum AccessDecision {
 
 enum PaymentResult { PAYMENT_OK, PAYMENT_CANCELLED, PAYMENT_FAILED };
 enum ParkingResult { PARKING_ALLOW, PARKING_DENY, PARKING_BYPASS };
+enum SyncKind { SYNC_DEPOSIT, SYNC_PICKUP, SYNC_STATE };
 
 struct AccessCheck {
   AccessDecision decision;
   String paymentId;
   String qrPayload;
   int fee;
+};
+
+struct SyncJob {
+  SyncKind kind;
+  String uid;
+  int locker;
 };
 
 const int LOCKER_COUNT = 2;
@@ -36,15 +43,16 @@ const int DOOR_PINS[LOCKER_COUNT] = {19, 27};
 
 const int SERVO_LOCK_ANGLE = 90;
 const int SERVO_UNLOCK_ANGLE = 0;
+const int SERVO_MOVE_DELAY = 350;
 
 // KY-003 + INPUT_PULLUP: nam cham gan cam bien = cua dong = LOW
 const int DOOR_CLOSED_STATE = LOW;
 const int DOOR_OPEN_STATE = HIGH;
 
 const unsigned long WAIT_OPEN_TIMEOUT = 10000;
-const unsigned long WAIT_CLOSE_TIMEOUT = 30000;
 const unsigned long DOOR_ALARM_AFTER = 15000;
-const unsigned long RESULT_HOLD = 3000;
+const unsigned long DOOR_CLOSED_STABLE = 200;
+const unsigned long RESULT_HOLD = 1500;
 
 const byte UID_MIN_LENGTH = 6;
 const byte UID_MAX_LENGTH = 14;
@@ -71,6 +79,7 @@ const unsigned long PAYMENT_CHOICE_TIMEOUT = 60000;
 const int QR_MAX_VERSION = 6;
 byte qrDrawX = 0;
 byte qrDrawY = 0;
+byte qrRenderedSize = 0;
 
 void drawQrModules(esp_qrcode_handle_t qrcode);
 
@@ -88,7 +97,14 @@ Preferences preferences;
 unsigned long lastHeartbeatAt = 0;
 bool serverOnline = false;
 bool idleVisible = false;
+bool idleReturnedEarly = false;
 String unoLine = "";
+String paymentPollId = "";
+TaskHandle_t paymentPollTask = nullptr;
+volatile bool paymentPollStop = false;
+volatile bool paymentPollFinished = true;
+volatile bool paymentPollPaid = false;
+volatile bool paymentPollOffline = false;
 
 void setup() {
   Serial.begin(115200);
@@ -106,12 +122,31 @@ void setup() {
   }
 
   preferences.begin("lockers", false);
+  bool needsDoorRecovery[LOCKER_COUNT];
+  for (int i = 0; i < LOCKER_COUNT; i++) {
+    pinMode(DOOR_PINS[i], INPUT_PULLUP);
+    loadLocker(i);
+    needsDoorRecovery[i] = !isDoorClosedStable(i);
+  }
+
+  // Doc cam bien xong moi ra lenh servo, tranh restart roi khoa khi cua con mo.
   for (int i = 0; i < LOCKER_COUNT; i++) {
     lockerServo[i].setPeriodHertz(50);
     lockerServo[i].attach(SERVO_PINS[i], 500, 2400);
-    pinMode(DOOR_PINS[i], INPUT_PULLUP);
+    lockerServo[i].write(needsDoorRecovery[i] ? SERVO_UNLOCK_ANGLE
+                                              : SERVO_LOCK_ANGLE);
+  }
+  delay(SERVO_MOVE_DELAY);
+  for (int i = 0; i < LOCKER_COUNT; i++)
+    lockerServo[i].detach();
+
+  // Restart luc cua dang mo: giu chot mo, nhac dong cua roi moi khoa lai.
+  for (int i = 0; i < LOCKER_COUNT; i++) {
+    if (!needsDoorRecovery[i])
+      continue;
+    showLockerGuide(i, "CUA DANG MO", "Dong cua lai");
+    waitForDoorClose(i, true);
     lockDoor(i);
-    loadLocker(i);
   }
 
   ensureWifi();
@@ -138,13 +173,15 @@ void readUnoRequest() {
 bool readUnoLine(String &line) {
   while (UnoSerial.available()) {
     char c = UnoSerial.read();
-    if (c == '\r') continue;
+    if (c == '\r')
+      continue;
 
     if (c == '\n') {
       unoLine.trim();
       line = unoLine;
       unoLine = "";
-      if (line.length() > 0) return true;
+      if (line.length() > 0)
+        return true;
       continue;
     }
 
@@ -160,14 +197,17 @@ bool readUnoLine(String &line) {
 void processRequest(const String &request) {
   Serial.print(F("Nhan Uno: "));
   Serial.println(request);
+  idleReturnedEarly = false;
 
-  // KEY chi co y nghia luc ESP dang cho chon thanh toan, gui nham o idle thi bo qua
-  if (request.startsWith("KEY|")) return;
+  // KEY chi co y nghia luc ESP dang cho chon thanh toan, gui nham o idle thi bo
+  // qua
+  if (request.startsWith("KEY|"))
+    return;
 
   // chi nhan dung format tu Uno: REQ|MODE|UID, sai thi bo luon cho de debug
   if (!request.startsWith("REQ|") || request.length() < 7 ||
       request.charAt(5) != '|') {
-    report(false, 0, "BAD_REQUEST", "LOI YEU CAU");
+    report(false, 0, "BAD_REQUEST", "LOI YEU CAU, HAY THU LAI");
     returnToIdle();
     return;
   }
@@ -198,8 +238,6 @@ void processRequest(const String &request) {
   }
 
   beepScanOk();
-  showText("DA NHAN THE", "Dang xu ly...");
-  postLockerState();
 
   if (mode == 'A')
     handleDeposit(uid);
@@ -210,5 +248,6 @@ void processRequest(const String &request) {
   else
     report(false, 0, "BAD_MODE", "SAI CHE DO");
 
-  returnToIdle();
+  if (!idleReturnedEarly)
+    returnToIdle();
 }

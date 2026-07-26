@@ -89,8 +89,40 @@ void postPickup(const String &uid) {
                                                            : F("fail"));
 }
 
+void syncTask(void *parameter) {
+  SyncJob *job = (SyncJob *)parameter;
+
+  if (job->kind == SYNC_DEPOSIT)
+    postDeposit(job->uid, job->locker);
+  else if (job->kind == SYNC_PICKUP)
+    postPickup(job->uid);
+
+  postLockerState();
+  delete job;
+  vTaskDelete(nullptr);
+}
+
+void syncInBackground(SyncKind kind, const String &uid, int locker) {
+  SyncJob *job = new SyncJob;
+  if (!job) {
+    Serial.println(F("[SYNC] khong tao duoc job nen bo qua"));
+    return;
+  }
+
+  job->kind = kind;
+  job->uid = uid;
+  job->locker = locker;
+
+  if (xTaskCreate(syncTask, "server-sync", 8192, job, 1, nullptr) != pdPASS) {
+    Serial.println(F("[SYNC] khong tao duoc task nen bo qua"));
+    delete job;
+  }
+}
+
 AccessCheck checkServerAccess(const String &uid, char mode) {
   AccessCheck result = {ACCESS_BYPASS, "", "", 0};
+
+  showText("DANG KIEM TRA", "Ket noi   may chu");
 
   // Mat mang thi cho mo tam, vi tu van con UID local trong NVS de doi chieu.
   if (!ensureWifi())
@@ -143,7 +175,7 @@ bool canContinueAfterAccess(const AccessCheck &access, int locker,
       return true;
 
     if (result == PAYMENT_CANCELLED)
-      report(false, locker + 1, "PAY_CANCEL", "DA HUY");
+      report(false, locker + 1, "PAY_CANCEL", "DA HUY THANH TOAN");
     else
       report(false, locker + 1, "PAY_TIMEOUT", "CHUA THANH TOAN");
     return false;
@@ -166,9 +198,11 @@ PaymentResult choosePayment(const AccessCheck &access, const String &uid) {
       return waitForPayment(access.paymentId, access.qrPayload, access.fee);
 
     if (key == '2') {
+      sendUnoUi("BUSY");
+      showText("DANG KIEM TRA", "Thong tin the xe");
       ParkingResult parking = deferPaymentToParking(uid, access.paymentId);
       if (parking == PARKING_ALLOW || parking == PARKING_BYPASS) {
-        showText(parking == PARKING_ALLOW ? "THE XE HOP LE" : "DANG XU LY",
+        showText(parking == PARKING_ALLOW ? "THE XE HOP LE" : "DA XAC NHAN",
                  "Dang mo...");
         return PAYMENT_OK;
       }
@@ -221,30 +255,87 @@ bool isPaymentReady(const String &paymentId) {
   return paid;
 }
 
+void paymentStatusTask(void *parameter) {
+  while (!paymentPollStop) {
+    if (!ensureWifi()) {
+      paymentPollOffline = true;
+      break;
+    }
+
+    if (isPaymentReady(paymentPollId)) {
+      paymentPollPaid = true;
+      break;
+    }
+
+    for (int waited = 0; waited < PAYMENT_POLL_EVERY && !paymentPollStop;
+         waited += 20)
+      delay(20);
+  }
+
+  paymentPollFinished = true;
+  paymentPollTask = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void startPaymentPolling(const String &paymentId) {
+  paymentPollId = paymentId;
+  paymentPollStop = false;
+  paymentPollFinished = false;
+  paymentPollPaid = false;
+  paymentPollOffline = false;
+
+  if (xTaskCreate(paymentStatusTask, "payment-poll", 8192, nullptr, 1,
+                  &paymentPollTask) != pdPASS) {
+    paymentPollFinished = true;
+    paymentPollOffline = true;
+  }
+}
+
+void stopPaymentPolling() {
+  paymentPollStop = true;
+  while (!paymentPollFinished)
+    delay(20);
+}
+
 PaymentResult waitForPayment(const String &paymentId, const String &qrPayload,
                              int fee) {
   if (paymentId.length() == 0)
     return PAYMENT_FAILED;
 
+  sendUnoUi("PAY_WAIT");
+  startPaymentPolling(paymentId);
   unsigned long startedAt = millis();
+  int lastSecondShown = -1;
+
   while (millis() - startedAt < PAYMENT_POLL_TIMEOUT) {
-    showPayment(paymentId, qrPayload, fee);
+    unsigned long elapsed = millis() - startedAt;
+    int secondsLeft = (PAYMENT_POLL_TIMEOUT - elapsed + 999) / 1000;
+    if (secondsLeft != lastSecondShown) {
+      showPayment(qrPayload, fee, secondsLeft);
+      lastSecondShown = secondsLeft;
+    }
 
-    if (readPaymentKey() == '*')
+    if (readPaymentKey() == '*') {
+      stopPaymentPolling();
       return PAYMENT_CANCELLED;
+    }
 
-    if (!ensureWifi()) {
+    if (paymentPollOffline) {
+      stopPaymentPolling();
       Serial.println(F("[PAY] mat mang luc cho, bypass"));
       return PAYMENT_OK;
     }
 
-    if (isPaymentReady(paymentId)) {
+    if (paymentPollPaid) {
+      stopPaymentPolling();
       showText("DA THANH TOAN", "Dang mo...");
       return PAYMENT_OK;
     }
 
-    delay(PAYMENT_POLL_EVERY);
+    delay(20);
   }
+
+  stopPaymentPolling();
 
   // Co luc webhook ve sat nut timeout, check them lan cuoi truoc khi bao fail.
   if (isPaymentReady(paymentId)) {

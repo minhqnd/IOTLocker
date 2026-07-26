@@ -21,7 +21,7 @@ Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 // HW-898-A TX -> D10. D11 is unused.
 SoftwareSerial rfidSerial(10, 11);
 
-// Uno A2 (TX) -> voltage divider -> ESP32 GPIO16.
+// Uno A2 (TX) -> chia ap -> ESP32 GPIO16; ESP32 GPIO17 -> Uno A3 (RX).
 SoftwareSerial espSerial(A3, A2);
 
 const byte UID_MIN_LENGTH = 6;
@@ -30,7 +30,11 @@ const unsigned long RFID_FRAME_TIMEOUT = 30;
 
 char mode = 0;
 String uidBuffer = "";
+String espBuffer = "";
 unsigned long lastRfidByteAt = 0;
+
+enum UiState { UI_IDLE, UI_BUSY, UI_PAY_MENU, UI_PAY_WAIT };
+UiState uiState = UI_IDLE;
 
 void setup() {
   Serial.begin(9600);
@@ -44,17 +48,19 @@ void setup() {
 }
 
 void loop() {
+  if (uiState != UI_IDLE)
+    readEspUi();
+
   readKeypad();
 
-  if (mode != 0) {
+  if (uiState == UI_IDLE && mode != 0) {
     String uid = readUid();
     if (uid.length() > 0) {
       sendRequest(mode, uid);
       mode = 0;
+      uiState = UI_BUSY;
       showWaiting();
-      delay(1500);
-      showMenu();
-      rfidSerial.listen();
+      espSerial.listen();
     }
   }
 }
@@ -63,15 +69,22 @@ void readKeypad() {
   char key = keypad.getKey();
   if (!key) return;
 
+  if (uiState != UI_IDLE) {
+    bool canChoosePayment = uiState == UI_PAY_MENU &&
+                            (key == '1' || key == '2' || key == '*');
+    bool canCancelPayment = uiState == UI_PAY_WAIT && key == '*';
+    if (canChoosePayment || canCancelPayment) {
+      sendKey(key);
+      uiState = UI_BUSY;
+      showSendingKey(key);
+    }
+    return;
+  }
+
   if (key == '*' && mode != 0) {
     mode = 0;
     uidBuffer = "";
     showMenu();
-    return;
-  }
-
-  if (key == '1' || key == '2' || key == '*') {
-    sendKey(key);
     return;
   }
 
@@ -94,7 +107,42 @@ void sendKey(char key) {
 
   Serial.print(F("KEY|"));
   Serial.println(key);
-  rfidSerial.listen();
+  espSerial.listen();
+}
+
+void readEspUi() {
+  while (espSerial.available()) {
+    char c = espSerial.read();
+    if (c == '\r') continue;
+
+    if (c == '\n') {
+      espBuffer.trim();
+      handleEspUi(espBuffer);
+      espBuffer = "";
+      continue;
+    }
+
+    if (espBuffer.length() < 24)
+      espBuffer += c;
+  }
+}
+
+void handleEspUi(const String &message) {
+  if (message == "UI|PAY_MENU") {
+    uiState = UI_PAY_MENU;
+    showPaymentMenu();
+  } else if (message == "UI|PAY_WAIT") {
+    uiState = UI_PAY_WAIT;
+    showPaymentWait();
+  } else if (message == "UI|BUSY") {
+    uiState = UI_BUSY;
+    showWaiting();
+  } else if (message == "UI|IDLE") {
+    uiState = UI_IDLE;
+    mode = 0;
+    showMenu();
+    rfidSerial.listen();
+  }
 }
 
 String readUid() {
@@ -176,7 +224,31 @@ void showScanPrompt(char selectedMode) {
 void showWaiting() {
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print(F("Da nhan the"));
+  lcd.print(F("Dang xu ly"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Vui long cho"));
+}
+
+void showPaymentMenu() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Vui long chon"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("1:QR 2:The *:Huy"));
+}
+
+void showPaymentWait() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Quet QR de TT"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Bam * de huy"));
+}
+
+void showSendingKey(char key) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(key == '*' ? F("Dang huy") : F("Dang xu ly"));
   lcd.setCursor(0, 1);
   lcd.print(F("Vui long cho"));
 }

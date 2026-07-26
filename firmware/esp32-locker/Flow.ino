@@ -1,7 +1,7 @@
 void handleDeposit(const String &uid) {
   int existingLocker = findLockerByUid(uid);
   if (existingLocker >= 0) {
-    report(false, existingLocker + 1, "ALREADY_HAS", "THE DA CO HOC");
+    report(false, existingLocker + 1, "ALREADY_HAS", "THE DA TON TAI");
     return;
   }
 
@@ -17,20 +17,19 @@ void handleDeposit(const String &uid) {
 
   DoorResult result = openLocker(locker, "CHE DO A: GUI", "Cho do vao");
   if (result != DOOR_OK) {
-    // cua chua tung mo thi coi nhu gui that bai, xoa UID vua luu de hoc van
-    // trong
+    // cua chua tung mo thi coi nhu gui that bai, xoa UID vua luu
     if (result == DOOR_NOT_OPENED) {
       lockerUid[locker] = "";
       saveLocker(locker);
     }
-    reportDoorError(result, locker);
+    reportDoorError(locker);
     printLockerState();
     return;
   }
 
   report(true, locker + 1, "DEPOSIT_OK", "GUI THANH CONG");
-  postDeposit(uid, locker);
-  postLockerState();
+  returnToIdle();
+  syncInBackground(SYNC_DEPOSIT, uid, locker);
   printLockerState();
 }
 
@@ -61,20 +60,23 @@ void handleExistingLocker(const String &uid, char mode, const char *title,
 
   DoorResult result = openLocker(locker, title, actionText);
   if (result != DOOR_OK) {
-    reportDoorError(result, locker);
+    reportDoorError(locker);
     return;
   }
-
-  report(true, locker + 1, okCode, okTitle);
 
   if (clearAfterOpen) {
     lockerUid[locker] = "";
     saveLocker(locker);
-    postPickup(uid);
-    postLockerState();
+  }
+
+  report(true, locker + 1, okCode, okTitle);
+  returnToIdle();
+
+  if (clearAfterOpen) {
+    syncInBackground(SYNC_PICKUP, uid, locker);
   } else {
     logEvent("reopen", uid, locker);
-    postLockerState();
+    syncInBackground(SYNC_STATE, uid, locker);
   }
 
   printLockerState();
